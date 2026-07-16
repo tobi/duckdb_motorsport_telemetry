@@ -93,9 +93,10 @@ FROM read_pds(
 
 `read_pds` creates a dynamic wide schema from the selected PDS channel names.
 Defaults are `rate := 100` and `interpolate := 'linear'`. Linear
-interpolation applies only to floating-point channels, including across
-contiguous chunk boundaries; integer/discrete channels use previous-sample
-semantics. Across globs, channels are unioned by
+interpolation applies to continuous floating-point channels, including across
+contiguous chunk boundaries. Integer channels and known discrete/event channels
+such as gear, lap beacon, status, state, flag, switch, and alarm use
+previous-sample semantics. Across globs, channels are unioned by
 case-insensitive name and absent channels are `NULL`.
 
 Like DuckDB's JSON and CSV readers, `filename := true` adds a `filename`

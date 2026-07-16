@@ -117,6 +117,31 @@ impl Channel {
     pub fn frequency_hz(&self) -> Option<f64> {
         self.first_period_ticks().map(|p| 10_000_000.0 / p as f64)
     }
+
+    fn uses_step_interpolation(&self) -> bool {
+        if !self.sample_type.is_float() {
+            return true;
+        }
+        let name = self
+            .name
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>();
+        [
+            "gear",
+            "lapnumber",
+            "lapbeacon",
+            "laptrigger",
+            "switch",
+            "status",
+            "state",
+            "flag",
+            "alarm",
+        ]
+        .iter()
+        .any(|token| name.contains(token))
+    }
 }
 
 #[derive(Debug)]
@@ -598,7 +623,7 @@ impl PdsFile {
         let relative = time_ns.saturating_sub(chunk.time_base_ns);
         let sample = (relative / period_ns).min(chunk.sample_count - 1);
         let a = self.decode(channel, chunk, sample);
-        if !linear || !channel.sample_type.is_float() {
+        if !linear || channel.uses_step_interpolation() {
             return Some(a);
         }
 
@@ -661,4 +686,29 @@ pub fn parse_channel_filter(value: Option<&str>) -> HashSet<String> {
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(name: &str, sample_type: SampleType) -> Channel {
+        Channel {
+            id: 1,
+            name: name.into(),
+            unit: String::new(),
+            sample_type,
+            chunks: Vec::new(),
+            sample_count: 0,
+            duration_ns: 0,
+        }
+    }
+
+    #[test]
+    fn discrete_channels_use_step_interpolation_even_when_stored_as_float() {
+        assert!(channel("Gear_Pos", SampleType::F32).uses_step_interpolation());
+        assert!(channel("Lap Beacon", SampleType::F32).uses_step_interpolation());
+        assert!(!channel("Speed_Ref", SampleType::F32).uses_step_interpolation());
+        assert!(channel("Speed_Ref", SampleType::I32).uses_step_interpolation());
+    }
 }
