@@ -1,0 +1,4 @@
+/target/
+/build/
+*.duckdb
+.DS_Store
