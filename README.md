@@ -16,9 +16,11 @@ Start DuckDB 1.4.3 with unsigned extensions enabled:
 duckdb -unsigned
 ```
 
-Install directly over HTTPS from this project's DuckDB extension repository:
+Enable DuckDB's signed HTTPS filesystem extension, then install directly from this project's extension repository:
 
 ```sql
+INSTALL httpfs;
+LOAD httpfs;
 INSTALL motorsport_telemetry
 FROM 'https://tobi.github.io/duckdb_motorsport_telemetry';
 LOAD motorsport_telemetry;
@@ -31,7 +33,7 @@ SELECT name, unit, frequency_hz, sample_count
 FROM telemetry_metadata('/path/to/run.pds');
 ```
 
-DuckDB downloads the platform-specific `.duckdb_extension.gz`, decompresses it, and installs it in the normal extension directory. Subsequent sessions only need:
+DuckDB downloads the platform-specific `.duckdb_extension.gz`, decompresses it, and installs it in the normal extension directory. `httpfs` is needed only because the repository uses HTTPS. Subsequent sessions only need:
 
 ```sql
 LOAD motorsport_telemetry;

@@ -12,6 +12,8 @@ Use the extension's exact metadata/sample relations before choosing a wide resam
 Published builds are unsigned. Start DuckDB 1.4.3 with `duckdb -unsigned`, then install over HTTPS:
 
 ```sql
+INSTALL httpfs;
+LOAD httpfs;
 INSTALL motorsport_telemetry
 FROM 'https://tobi.github.io/duckdb_motorsport_telemetry';
 LOAD motorsport_telemetry;
