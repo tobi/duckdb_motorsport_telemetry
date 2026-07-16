@@ -118,6 +118,11 @@ impl VboFile {
             path: display.clone(),
             source,
         })?;
+        Self::from_bytes(display, bytes)
+    }
+
+    pub fn from_bytes(path: impl Into<String>, bytes: Vec<u8>) -> Result<Self, VboError> {
+        let display = path.into();
         if bytes.is_empty() {
             return Err(invalid(&display, "empty file"));
         }

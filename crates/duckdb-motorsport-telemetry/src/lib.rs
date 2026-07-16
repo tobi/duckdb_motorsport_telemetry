@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use cosworth_telemetry::CosworthFile;
 use duckdb::{
-    core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
+    core::{DataChunkHandle, FlatVector, Inserter, LogicalTypeHandle, LogicalTypeId},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
@@ -12,6 +12,8 @@ use motec_telemetry::MotecFile;
 use motorsport_telemetry_core::SourceRef;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+#[cfg(target_os = "emscripten")]
+use std::ffi::{c_void, CString};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -23,6 +25,22 @@ use vbo_telemetry::VboFile;
 const VECTOR_SIZE: u64 = 2048;
 const SAMPLES_COLUMN_COUNT: u64 = 9;
 const CHANNELS_COLUMN_COUNT: u64 = 12;
+
+trait FlatVectorExt {
+    fn typed_slice<T>(&mut self) -> &mut [T];
+}
+#[cfg(not(target_os = "emscripten"))]
+impl FlatVectorExt for FlatVector {
+    fn typed_slice<T>(&mut self) -> &mut [T] {
+        self.as_mut_slice::<T>()
+    }
+}
+#[cfg(target_os = "emscripten")]
+impl FlatVectorExt for FlatVector<'_> {
+    fn typed_slice<T>(&mut self) -> &mut [T] {
+        unsafe { self.as_mut_slice::<T>() }
+    }
+}
 
 fn ty(id: LogicalTypeId) -> LogicalTypeHandle {
     LogicalTypeHandle::from(id)
@@ -165,7 +183,82 @@ fn create_date_micros(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "emscripten")]
+fn read_vfs(bind: &BindInfo, path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    // BindInfo is a one-pointer wrapper in duckdb-rs. The public wrapper does not
+    // expose that pointer, while DuckDB's VFS API requires the raw bind info.
+    debug_assert_eq!(
+        std::mem::size_of::<BindInfo>(),
+        std::mem::size_of::<ffi::duckdb_bind_info>()
+    );
+    let info = unsafe { *(bind as *const BindInfo as *const ffi::duckdb_bind_info) };
+    let mut context: ffi::duckdb_client_context = std::ptr::null_mut();
+    unsafe { ffi::duckdb_table_function_get_client_context(info, &mut context) };
+    if context.is_null() {
+        return Err("DuckDB did not expose a client context".into());
+    }
+    let mut filesystem = unsafe { ffi::duckdb_client_context_get_file_system(context) };
+    if filesystem.is_null() {
+        unsafe { ffi::duckdb_destroy_client_context(&mut context) };
+        return Err("DuckDB did not expose its virtual filesystem".into());
+    }
+    let c_path = CString::new(path)?;
+    let mut options = unsafe { ffi::duckdb_create_file_open_options() };
+    unsafe {
+        ffi::duckdb_file_open_options_set_flag(
+            options,
+            ffi::duckdb_file_flag_DUCKDB_FILE_FLAG_READ,
+            true,
+        )
+    };
+    let mut handle: ffi::duckdb_file_handle = std::ptr::null_mut();
+    let state =
+        unsafe { ffi::duckdb_file_system_open(filesystem, c_path.as_ptr(), options, &mut handle) };
+    unsafe { ffi::duckdb_destroy_file_open_options(&mut options) };
+    if state != ffi::DuckDBSuccess || handle.is_null() {
+        unsafe {
+            ffi::duckdb_destroy_file_system(&mut filesystem);
+            ffi::duckdb_destroy_client_context(&mut context);
+        }
+        return Err(format!("cannot open telemetry file {path} through DuckDB's VFS").into());
+    }
+    let size = unsafe { ffi::duckdb_file_handle_size(handle) };
+    if size < 0 || size > 4 * 1024 * 1024 * 1024_i64 {
+        unsafe {
+            ffi::duckdb_destroy_file_handle(&mut handle);
+            ffi::duckdb_destroy_file_system(&mut filesystem);
+            ffi::duckdb_destroy_client_context(&mut context);
+        }
+        return Err(format!("invalid or excessive telemetry file size for {path}: {size}").into());
+    }
+    let mut data = vec![0u8; size as usize];
+    let mut read = 0usize;
+    while read < data.len() {
+        let count = unsafe {
+            ffi::duckdb_file_handle_read(
+                handle,
+                data[read..].as_mut_ptr().cast::<c_void>(),
+                (data.len() - read) as i64,
+            )
+        };
+        if count <= 0 {
+            break;
+        }
+        read += count as usize;
+    }
+    unsafe {
+        ffi::duckdb_destroy_file_handle(&mut handle);
+        ffi::duckdb_destroy_file_system(&mut filesystem);
+        ffi::duckdb_destroy_client_context(&mut context);
+    }
+    if read != data.len() {
+        return Err(format!("short read for {path}: {read} of {} bytes", data.len()).into());
+    }
+    Ok(data)
+}
+
 fn open_paths(
+    _bind: &BindInfo,
     pattern: &str,
     required_format: Option<&str>,
     create_date_from: Option<i64>,
@@ -193,11 +286,23 @@ fn open_paths(
         {
             continue;
         }
+        #[cfg(not(target_os = "emscripten"))]
         let source: SourceRef = match format {
             "pds" => Arc::new(CosworthFile::open(&path)?),
             "motec" => Arc::new(MotecFile::open(&path)?),
             "vbo" => Arc::new(VboFile::open(&path)?),
             _ => unreachable!(),
+        };
+        #[cfg(target_os = "emscripten")]
+        let source: SourceRef = {
+            let display = path.to_string_lossy().into_owned();
+            let bytes = read_vfs(_bind, &display)?;
+            match format {
+                "pds" => Arc::new(CosworthFile::from_bytes(display, bytes)?) as SourceRef,
+                "motec" => Arc::new(MotecFile::from_bytes(display, bytes)?) as SourceRef,
+                "vbo" => Arc::new(VboFile::from_bytes(display, bytes)?) as SourceRef,
+                _ => unreachable!(),
+            }
         };
         result.push(InputFile {
             source,
@@ -244,7 +349,7 @@ impl VTab for SamplesVTab {
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
         let pattern = bind.get_parameter(0).to_string();
-        let files = open_paths(&pattern, None, None, None)?;
+        let files = open_paths(bind, &pattern, None, None, None)?;
         let filter_value = named_string(bind, "channel");
         let channel_filter = parse_channel_filter(filter_value.as_deref());
         if !channel_filter.is_empty() {
@@ -378,7 +483,7 @@ impl VTab for SamplesVTab {
                         vector.insert(row, file.format());
                     }
                 }
-                2 => output.flat_vector(out_col).as_mut_slice::<u32>()[..n].fill(channel.id),
+                2 => output.flat_vector(out_col).typed_slice::<u32>()[..n].fill(channel.id),
                 3 => {
                     let vector = output.flat_vector(out_col);
                     for row in 0..n {
@@ -391,18 +496,18 @@ impl VTab for SamplesVTab {
                         vector.insert(row, channel.unit.as_str());
                     }
                 }
-                5 => output.flat_vector(out_col).as_mut_slice::<f64>()[..n]
+                5 => output.flat_vector(out_col).typed_slice::<f64>()[..n]
                     .fill(1e9 / chunk.sample_period_ns as f64),
                 6 => {
                     let mut vector = output.flat_vector(out_col);
-                    let dst = &mut vector.as_mut_slice::<u64>()[..n];
+                    let dst = &mut vector.typed_slice::<u64>()[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
                         *value = chunk.sample_base + segment.local_start + row as u64;
                     }
                 }
                 7 => {
                     let mut vector = output.flat_vector(out_col);
-                    let dst = &mut vector.as_mut_slice::<i64>()[..n];
+                    let dst = &mut vector.typed_slice::<i64>()[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
                         *value = file.sample_time_ns(
                             segment.channel,
@@ -413,7 +518,7 @@ impl VTab for SamplesVTab {
                 }
                 8 => {
                     let mut vector = output.flat_vector(out_col);
-                    let dst = &mut vector.as_mut_slice::<f64>()[..n];
+                    let dst = &mut vector.typed_slice::<f64>()[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
                         *value = file.decode(
                             segment.channel,
@@ -422,7 +527,7 @@ impl VTab for SamplesVTab {
                         );
                     }
                 }
-                _ => output.flat_vector(out_col).as_mut_slice::<i64>()[..n].fill(index as i64),
+                _ => output.flat_vector(out_col).typed_slice::<i64>()[..n].fill(index as i64),
             }
         }
         output.set_len(n);
@@ -461,7 +566,7 @@ impl VTab for ChannelsVTab {
     type InitData = ChannelsInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        let files = open_paths(&bind.get_parameter(0).to_string(), None, None, None)?;
+        let files = open_paths(bind, &bind.get_parameter(0).to_string(), None, None, None)?;
         for (name, logical) in [
             ("file", LogicalTypeId::Varchar),
             ("format", LogicalTypeId::Varchar),
@@ -522,29 +627,29 @@ impl VTab for ChannelsVTab {
                 match original {
                     0 => vector.insert(row, file.path()),
                     1 => vector.insert(row, file.format()),
-                    2 => vector.as_mut_slice::<u32>()[row] = channel.id,
+                    2 => vector.typed_slice::<u32>()[row] = channel.id,
                     3 => vector.insert(row, channel.name.as_str()),
                     4 => vector.insert(row, channel.unit.as_str()),
-                    5 => vector.as_mut_slice::<u32>()[row] = channel.sample_type.code(),
+                    5 => vector.typed_slice::<u32>()[row] = channel.sample_type.code(),
                     6 => vector.insert(row, channel.sample_type.name()),
                     7 => {
                         if let Some(value) = channel.frequency_hz() {
-                            vector.as_mut_slice::<f64>()[row] = value
+                            vector.typed_slice::<f64>()[row] = value
                         } else {
                             vector.set_null(row)
                         }
                     }
                     8 => {
                         if let Some(period) = channel.first_period_ns() {
-                            vector.as_mut_slice::<u64>()[row] = period
+                            vector.typed_slice::<u64>()[row] = period
                         } else {
                             vector.set_null(row)
                         }
                     }
-                    9 => vector.as_mut_slice::<u64>()[row] = channel.sample_count,
-                    10 => vector.as_mut_slice::<u64>()[row] = channel.chunks.len() as u64,
-                    11 => vector.as_mut_slice::<u64>()[row] = channel.duration_ns,
-                    _ => vector.as_mut_slice::<i64>()[row] = (start + row) as i64,
+                    9 => vector.typed_slice::<u64>()[row] = channel.sample_count,
+                    10 => vector.typed_slice::<u64>()[row] = channel.chunks.len() as u64,
+                    11 => vector.typed_slice::<u64>()[row] = channel.duration_ns,
+                    _ => vector.typed_slice::<i64>()[row] = (start + row) as i64,
                 }
             }
         }
@@ -599,7 +704,13 @@ impl VTab for WideVTab {
         if matches!((create_date_from, create_date_to), (Some(from), Some(to)) if to < from) {
             return Err("create_date_to must be greater than or equal to create_date_from".into());
         }
-        let files = open_paths(&pattern, config.format, create_date_from, create_date_to)?;
+        let files = open_paths(
+            bind,
+            &pattern,
+            config.format,
+            create_date_from,
+            create_date_to,
+        )?;
         let rate = named_i64(bind, "rate").unwrap_or(100);
         if !(1..=5000).contains(&rate) {
             return Err("rate must be between 1 and 5000 Hz".into());
@@ -761,12 +872,12 @@ impl VTab for WideVTab {
                     }
                 }
                 col if bind.include_create_date && col == create_date_column => {
-                    output.flat_vector(out_col).as_mut_slice::<i64>()[..n]
+                    output.flat_vector(out_col).typed_slice::<i64>()[..n]
                         .fill(file.create_date_micros);
                 }
                 col if col == time_column => {
                     let mut vector = output.flat_vector(out_col);
-                    let dst = &mut vector.as_mut_slice::<i64>()[..n];
+                    let dst = &mut vector.typed_slice::<i64>()[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
                         let source_row = segment.row_start + row as u64;
                         *value = (start_ns as u128
@@ -786,7 +897,7 @@ impl VTab for WideVTab {
                                 + source_row as u128 * 1_000_000_000u128 / bind.rate as u128)
                                 as u64;
                             if let Some(value) = file.sample_at(channel_idx, time_ns, bind.linear) {
-                                vector.as_mut_slice::<f64>()[row] = value;
+                                vector.typed_slice::<f64>()[row] = value;
                             } else {
                                 vector.set_null(row);
                             }
@@ -797,9 +908,7 @@ impl VTab for WideVTab {
                         }
                     }
                 }
-                _ => {
-                    output.flat_vector(out_col).as_mut_slice::<i64>()[..n].fill(segment_idx as i64)
-                }
+                _ => output.flat_vector(out_col).typed_slice::<i64>()[..n].fill(segment_idx as i64),
             }
         }
         output.set_len(n);
@@ -828,7 +937,14 @@ impl VTab for WideVTab {
     }
 }
 
-#[duckdb_entrypoint_c_api(ext_name = "motorsport_telemetry", min_duckdb_version = "v1.2.0")]
+#[cfg_attr(
+    not(target_os = "emscripten"),
+    duckdb_entrypoint_c_api(ext_name = "motorsport_telemetry", min_duckdb_version = "v1.2.0")
+)]
+#[cfg_attr(
+    target_os = "emscripten",
+    duckdb_entrypoint_c_api(ext_name = "motorsport_telemetry", min_duckdb_version = "v1.2.0")
+)]
 pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<ChannelsVTab>("telemetry_metadata")?;
     con.register_table_function::<SamplesVTab>("telemetry_samples")?;

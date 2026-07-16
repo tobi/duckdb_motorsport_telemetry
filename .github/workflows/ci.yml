@@ -23,6 +23,37 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  wasm-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm-extension
+      - uses: oven-sh/setup-bun@v2
+      - name: Build WASM extension
+        run: scripts/build_wasm_extension.sh
+      - name: Build and test browser lab
+        run: |
+          mkdir -p web/public/v1.5.4/wasm_eh web/public/v1.5.4/wasm_mvp
+          cp build/wasm/wasm_eh/motorsport_telemetry.duckdb_extension.wasm web/public/v1.5.4/wasm_eh/
+          cp build/wasm/wasm_mvp/motorsport_telemetry.duckdb_extension.wasm web/public/v1.5.4/wasm_mvp/
+          cd web
+          bun install --frozen-lockfile
+          bun run build
+          bunx vite preview --host 127.0.0.1 --port 4173 &
+          server=$!
+          trap 'kill $server' EXIT
+          sleep 2
+          CHROME=/usr/bin/google-chrome node tests/smoke.mjs
+
   duckdb-integration:
     runs-on: ubuntu-latest
     steps:

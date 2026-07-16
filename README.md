@@ -41,6 +41,20 @@ LOAD motorsport_telemetry;
 
 The repository artifacts are unsigned, so every DuckDB process loading the extension must still allow unsigned extensions. See [Install from GitHub Releases](#install-from-github-releases) for manual ZIP installation and Python usage.
 
+## Browser telemetry lab
+
+Open **[Telemetry Lab](https://pages.tobi.lutke.com/duckdb_motorsport_telemetry/)** to analyze a recording without installing anything. Drop a `.pds`, `.ld`, or `.vbo` file into the page; the file stays in your browser and is never uploaded.
+
+The lab runs this same Rust extension as a DuckDB-Wasm side module and automatically shows:
+
+- recorded versus empty channel definitions
+- exact native rates, sample counts, units, and duration
+- likely speed, brake, throttle, acceleration, and gear signals
+- exact min/mean/max statistics and a quick synchronized trace
+- a full SQL workbench with useful starter queries
+
+The browser smoke test generates synthetic PDS, MoTeC, and VBO files at runtime, drops each into Chromium, verifies parsing, and executes SQL. No real telemetry fixture is committed.
+
 ## SQL in 30 seconds
 
 ```sql
@@ -344,7 +358,7 @@ LOAD motorsport_telemetry;
 
 ## Build from source
 
-Requirements: Rust 1.84+, Python 3, DuckDB CLI 1.4.x.
+Requirements for native builds: Rust 1.84+, Python 3, DuckDB CLI 1.4.x.
 
 ```sh
 git clone https://github.com/tobi/duckdb_motorsport_telemetry.git
@@ -369,10 +383,27 @@ python scripts/package_extension.py \
   --platform linux_amd64
 ```
 
+Build the browser side module with Rust's Emscripten target and an activated emsdk:
+
+```sh
+source /path/to/emsdk/emsdk_env.sh
+./scripts/build_wasm_extension.sh
+cd web
+bun install
+bun run build
+```
+
+WASM outputs:
+
+```text
+build/wasm/wasm_eh/motorsport_telemetry.duckdb_extension.wasm
+build/wasm/wasm_mvp/motorsport_telemetry.duckdb_extension.wasm
+```
+
 GitHub Actions workflows:
 
-- `.github/workflows/ci.yml` — formatting, Clippy, tests on Linux/Windows/macOS, plus DuckDB SQL integration
-- `.github/workflows/release.yml` — tagged Linux, Windows, and macOS builds and GitHub Release ZIPs
+- `.github/workflows/ci.yml` — formatting, Clippy, native tests, synthetic SQL integration, WASM compilation, browser build, and headless Chromium PDS/MoTeC/VBO smoke tests
+- `.github/workflows/release.yml` — Linux, Windows, macOS, `wasm_eh`, and `wasm_mvp` builds; release ZIPs; browser lab and extension-repository deployment
 
 ## Reusable Rust crates
 

@@ -1,0 +1,36 @@
+[workspace]
+
+[package]
+name = "duckdb-motorsport-telemetry-wasm"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/unused_lib.rs"
+
+[[example]]
+name = "motorsport_telemetry"
+crate-type = ["staticlib"]
+path = "src/wasm_lib.rs"
+
+[dependencies]
+motorsport-telemetry-core = { path = "../crates/telemetry-core" }
+cosworth-telemetry = { path = "../crates/cosworth-telemetry" }
+motec-telemetry = { path = "../crates/motec-telemetry" }
+vbo-telemetry = { path = "../crates/vbo-telemetry" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+duckdb = { version = "=1.10504.0", features = ["vtab-loadable", "loadable-extension"] }
+duckdb-loadable-macros = "=1.10504.0"
+glob = "0.3"
+libduckdb-sys = { version = "=1.10504.0", features = ["loadable-extension"] }
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

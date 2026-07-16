@@ -1,6 +1,9 @@
+#[cfg(not(target_os = "emscripten"))]
 use memmap2::Mmap;
 use std::collections::HashMap;
+#[cfg(not(target_os = "emscripten"))]
 use std::fs::File;
+#[cfg(not(target_os = "emscripten"))]
 use std::path::Path;
 use thiserror::Error;
 
@@ -21,10 +24,27 @@ pub enum CosworthError {
 }
 
 #[derive(Debug)]
+enum Storage {
+    #[cfg(not(target_os = "emscripten"))]
+    Mapped(Mmap),
+    Owned(Box<[u8]>),
+}
+impl std::ops::Deref for Storage {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Mapped(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct CosworthFile {
     pub path: String,
     pub channels: Vec<Channel>,
-    data: Mmap,
+    data: Storage,
 }
 
 #[derive(Clone, Copy)]
@@ -381,6 +401,7 @@ fn parse_chunks(data: &[u8], layout: Layout, is_export: bool) -> Vec<RawChunk> {
 }
 
 impl CosworthFile {
+    #[cfg(not(target_os = "emscripten"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CosworthError> {
         let path = path.as_ref();
         let display = path.to_string_lossy().into_owned();
@@ -392,6 +413,14 @@ impl CosworthFile {
             path: display.clone(),
             source,
         })?;
+        Self::parse(display, Storage::Mapped(data))
+    }
+
+    pub fn from_bytes(path: impl Into<String>, data: Vec<u8>) -> Result<Self, CosworthError> {
+        Self::parse(path.into(), Storage::Owned(data.into_boxed_slice()))
+    }
+
+    fn parse(display: String, data: Storage) -> Result<Self, CosworthError> {
         if data.len() < 0x100 {
             return Err(invalid(&display, "file is smaller than 256 bytes"));
         }

@@ -1,6 +1,9 @@
+#[cfg(not(target_os = "emscripten"))]
 use memmap2::Mmap;
 use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource};
+#[cfg(not(target_os = "emscripten"))]
 use std::fs::File;
+#[cfg(not(target_os = "emscripten"))]
 use std::path::Path;
 use thiserror::Error;
 
@@ -31,6 +34,23 @@ struct Encoding {
 }
 
 #[derive(Debug)]
+enum Storage {
+    #[cfg(not(target_os = "emscripten"))]
+    Mapped(Mmap),
+    Owned(Box<[u8]>),
+}
+impl std::ops::Deref for Storage {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Mapped(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct MotecFile {
     pub path: String,
     pub driver: String,
@@ -40,7 +60,7 @@ pub struct MotecFile {
     pub time: String,
     pub channels: Vec<Channel>,
     encodings: Vec<Encoding>,
-    data: Mmap,
+    data: Storage,
 }
 
 fn invalid(path: &str, message: impl Into<String>) -> MotecError {
@@ -97,6 +117,7 @@ fn unit_text(data: &[u8], offset: usize, length: usize) -> String {
 }
 
 impl MotecFile {
+    #[cfg(not(target_os = "emscripten"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MotecError> {
         let path = path.as_ref();
         let display = path.to_string_lossy().into_owned();
@@ -108,6 +129,14 @@ impl MotecFile {
             path: display.clone(),
             source,
         })?;
+        Self::parse(display, Storage::Mapped(data))
+    }
+
+    pub fn from_bytes(path: impl Into<String>, data: Vec<u8>) -> Result<Self, MotecError> {
+        Self::parse(path.into(), Storage::Owned(data.into_boxed_slice()))
+    }
+
+    fn parse(display: String, data: Storage) -> Result<Self, MotecError> {
         if data.len() < MIN_FILE_SIZE {
             return Err(invalid(&display, "file is too small"));
         }

@@ -2,3 +2,8 @@
 /build/
 *.duckdb
 .DS_Store
+
+/wasm-extension/target/
+/web/node_modules/
+/web/dist/
+/web/public/
