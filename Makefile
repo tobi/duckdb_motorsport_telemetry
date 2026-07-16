@@ -1,6 +1,6 @@
 DUCKDB ?= duckdb
 PROFILE ?= release
-EXTENSION_VERSION ?= v0.2.0
+EXTENSION_VERSION ?= v0.3.0
 PLATFORM ?= $(shell $(DUCKDB) -csv -noheader -c "PRAGMA platform;")
 CARGO_FLAGS := $(if $(filter release,$(PROFILE)),--release,)
 TARGET_DIR := target/$(PROFILE)

@@ -68,11 +68,22 @@ jobs:
         with:
           workspaces: wasm-extension
       - name: Build DuckDB-Wasm extension
-        run: scripts/build_wasm_extension.sh
+        run: |
+          scripts/build_wasm_extension.sh
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+          for platform in ('wasm_eh', 'wasm_mvp'):
+              source = Path('build/wasm') / platform / 'motorsport_telemetry.duckdb_extension.wasm'
+              with ZipFile(f'build/wasm/motorsport_telemetry-{platform}.zip', 'w', ZIP_DEFLATED) as archive:
+                  archive.write(source, source.name)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: motorsport_telemetry-wasm
           path: |
+            build/wasm/motorsport_telemetry-wasm_eh.zip
+            build/wasm/motorsport_telemetry-wasm_mvp.zip
             build/wasm/wasm_eh/motorsport_telemetry.duckdb_extension.wasm
             build/wasm/wasm_mvp/motorsport_telemetry.duckdb_extension.wasm
 

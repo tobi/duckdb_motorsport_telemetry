@@ -416,7 +416,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cosworth-telemetry"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "memmap2",
  "motorsport-telemetry-core",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "duckdb-motorsport-telemetry"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "cosworth-telemetry",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "motec-telemetry"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "memmap2",
  "motorsport-telemetry-core",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "motorsport-telemetry-core"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "num"
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "vbo-telemetry"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "motorsport-telemetry-core",
  "tempfile",

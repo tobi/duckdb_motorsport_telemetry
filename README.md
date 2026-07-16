@@ -309,7 +309,7 @@ The HTTPS `INSTALL ... FROM` command above is recommended. For manual or offline
 ### Linux x86-64
 
 ```sh
-curl -LO https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.2.0/motorsport_telemetry-linux_amd64.zip
+curl -LO https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.3.0/motorsport_telemetry-linux_amd64.zip
 unzip motorsport_telemetry-linux_amd64.zip
 duckdb -unsigned
 ```
@@ -323,7 +323,7 @@ LOAD motorsport_telemetry;
 
 ```powershell
 Invoke-WebRequest `
-  https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.2.0/motorsport_telemetry-windows_amd64.zip `
+  https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.3.0/motorsport_telemetry-windows_amd64.zip `
   -OutFile motorsport_telemetry-windows_amd64.zip
 Expand-Archive motorsport_telemetry-windows_amd64.zip
 .\duckdb.exe -unsigned
