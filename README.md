@@ -30,17 +30,22 @@ synthetic multi-chunk PDS file.
 
 ## SQL API
 
-### Inspect channels
+The exact relational model has two tables: channel metadata and raw samples.
+Because channels have independent sample rates, the raw sample table does not
+invent a shared row clock. `read_pds` is a third, convenience facade that
+constructs a shared timeline and interpolates onto it.
+
+### Inspect channel metadata
 
 ```sql
 SELECT name, unit, data_type, frequency_hz, sample_count, chunk_count
-FROM pds_channels('run.pds')
+FROM pds_metadata('run.pds')
 WHERE sample_count > 0
 ORDER BY name;
 ```
 
-`pds_channels(path)` returns one row per definition, including definitions with
-no sample chunks. `path` may be a local glob.
+`pds_metadata(path)` returns one row per definition, including definitions with
+no sample chunks. `pds_channels(path)` is an alias. `path` may be a local glob.
 
 Columns: `file`, `channel_id`, `name`, `unit`, `type_code`, `data_type`,
 `frequency_hz`, `sample_period_ns`, `sample_count`, `chunk_count`, `duration_ns`.
@@ -81,15 +86,28 @@ FROM read_pds(
   channels := 'Speed_Ref,I_ACCEL_LONG',
   interpolate := 'linear',
   start_ns := 500000000000,
-  end_ns := 530000000000
+  end_ns := 530000000000,
+  filename := true
 );
 ```
 
 `read_pds` creates a dynamic wide schema from the selected PDS channel names.
-Defaults are `rate := 100` and `interpolate := 'previous'`. Linear
-interpolation applies only to floating-point channels; integer/discrete
-channels remain previous-sample. Across globs, channels are unioned by
+Defaults are `rate := 100` and `interpolate := 'linear'`. Linear
+interpolation applies only to floating-point channels, including across
+contiguous chunk boundaries; integer/discrete channels use previous-sample
+semantics. Across globs, channels are unioned by
 case-insensitive name and absent channels are `NULL`.
+
+Like DuckDB's JSON and CSV readers, `filename := true` adds a `filename`
+column containing the full source path. It defaults to `false`, so single-file
+scans do not carry a repeated string column. `add_filename_as_column := true`
+is accepted as an explicit alias:
+
+```sql
+SELECT filename, max("Speed_Ref")
+FROM read_pds('weekend/**/*.pds', channels := 'Speed_Ref', filename := true)
+GROUP BY filename;
+```
 
 ## Pushdown and performance
 

@@ -41,8 +41,12 @@ PY
 
 sql="LOAD '$EXTENSION';
 SELECT CASE WHEN (SELECT sample_count FROM pds_channels('$fixture') WHERE name='Speed') = 4 THEN true ELSE error('bad channel metadata') END;
+SELECT CASE WHEN (SELECT sample_count FROM pds_metadata('$fixture') WHERE name='Speed') = 4 THEN true ELSE error('metadata alias failed') END;
 SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM pds_samples('$fixture', channel='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('chunk order was not preserved') END;
-SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_pds('$fixture', rate=1, channels='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('wide scan failed') END;"
+SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_pds('$fixture', rate=1, channels='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('wide scan failed') END;
+SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_pds('$fixture', rate=2, channels='Speed', end_ns=3000000000)) = [10.0, 10.5, 11.0, 11.5, 12.0, 12.5] THEN true ELSE error('mixed-rate interpolation failed') END;
+SELECT CASE WHEN (SELECT filename FROM read_pds('$fixture', channels='Speed', filename=true) LIMIT 1) = '$fixture' THEN true ELSE error('filename option failed') END;
+SELECT CASE WHEN (SELECT filename FROM read_pds('$fixture', channels='Speed', add_filename_as_column=true) LIMIT 1) = '$fixture' THEN true ELSE error('filename alias failed') END;"
 results="$("$DUCKDB" -unsigned -csv -noheader -c "$sql")"
-[[ "$(grep -c '^true$' <<<"$results")" = 3 ]]
+[[ "$(grep -c '^true$' <<<"$results")" = 7 ]]
 printf 'integration tests passed\n'

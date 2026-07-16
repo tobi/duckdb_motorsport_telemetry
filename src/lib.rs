@@ -28,6 +28,9 @@ fn named_string(bind: &BindInfo, name: &str) -> Option<String> {
 fn named_i64(bind: &BindInfo, name: &str) -> Option<i64> {
     bind.get_named_parameter(name).map(|v| v.to_int64())
 }
+fn named_bool(bind: &BindInfo, name: &str) -> Option<bool> {
+    bind.get_named_parameter(name).map(|v| v.to_int64() != 0)
+}
 fn projected(init: &InitInfo, total: u64) -> Vec<u64> {
     let cols = init.get_column_indices();
     if cols.is_empty() {
@@ -387,6 +390,7 @@ struct WideBind {
     ranges: Vec<(u64, u64, u64)>, // start_ns, end_ns, row_count
     rate: u64,
     linear: bool,
+    include_filename: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -418,12 +422,16 @@ impl VTab for WideVTab {
             return Err("end_ns must be greater than or equal to start_ns".into());
         }
         let interpolation = named_string(bind, "interpolate")
-            .unwrap_or_else(|| "previous".into())
+            .unwrap_or_else(|| "linear".into())
             .to_ascii_lowercase();
         if interpolation != "previous" && interpolation != "linear" {
             return Err("interpolate must be 'previous' or 'linear'".into());
         }
         let filter = parse_channel_filter(named_string(bind, "channels").as_deref());
+        // `filename` follows DuckDB's read_json/read_csv convention. Keep the
+        // more explicit spelling as an alias for callers that use it already.
+        let include_filename = named_bool(bind, "filename").unwrap_or(false)
+            || named_bool(bind, "add_filename_as_column").unwrap_or(false);
 
         let mut names = Vec::new();
         let mut keys = HashSet::new();
@@ -450,7 +458,9 @@ impl VTab for WideVTab {
             }
         }
 
-        bind.add_result_column("file", ty(LogicalTypeId::Varchar));
+        if include_filename {
+            bind.add_result_column("filename", ty(LogicalTypeId::Varchar));
+        }
         bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
         for name in &names {
             bind.add_result_column(name, ty(LogicalTypeId::Double));
@@ -498,6 +508,7 @@ impl VTab for WideVTab {
             ranges,
             rate: rate as u64,
             linear: interpolation == "linear",
+            include_filename,
         })
     }
 
@@ -517,10 +528,11 @@ impl VTab for WideVTab {
             }
         }
         init.set_max_threads(worker_count(segments.len()));
+        let fixed_columns = 1 + usize::from(bind.include_filename);
         Ok(WideInit {
             next: AtomicUsize::new(0),
             segments,
-            projected: projected(init, (bind.names.len() + 2) as u64),
+            projected: projected(init, (bind.names.len() + fixed_columns) as u64),
         })
     }
 
@@ -542,14 +554,16 @@ impl VTab for WideVTab {
             if out_col >= output.num_columns() {
                 break;
             }
+            let time_column = u64::from(bind.include_filename);
+            let channel_offset = time_column + 1;
             match original {
-                0 => {
+                0 if bind.include_filename => {
                     let vector = output.flat_vector(out_col);
                     for row in 0..n {
                         vector.insert(row, file.path.as_str());
                     }
                 }
-                1 => {
+                col if col == time_column => {
                     let mut vector = output.flat_vector(out_col);
                     let dst = &mut vector.as_mut_slice::<i64>()[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
@@ -559,8 +573,10 @@ impl VTab for WideVTab {
                             as i64;
                     }
                 }
-                col if col >= 2 && (col as usize - 2) < bind.names.len() => {
-                    let wide_idx = col as usize - 2;
+                col if col >= channel_offset
+                    && (col - channel_offset) < bind.names.len() as u64 =>
+                {
+                    let wide_idx = (col - channel_offset) as usize;
                     let mut vector = output.flat_vector(out_col);
                     if let Some(channel_idx) = bind.source_channels[segment.file][wide_idx] {
                         let channel = &file.channels[channel_idx];
@@ -603,12 +619,15 @@ impl VTab for WideVTab {
             ("start_ns".into(), ty(LogicalTypeId::Bigint)),
             ("end_ns".into(), ty(LogicalTypeId::Bigint)),
             ("interpolate".into(), ty(LogicalTypeId::Varchar)),
+            ("filename".into(), ty(LogicalTypeId::Boolean)),
+            ("add_filename_as_column".into(), ty(LogicalTypeId::Boolean)),
         ])
     }
 }
 
 #[duckdb_entrypoint_c_api(ext_name = "pds", min_duckdb_version = "v1.2.0")]
 pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
+    con.register_table_function::<ChannelsVTab>("pds_metadata")?;
     con.register_table_function::<ChannelsVTab>("pds_channels")?;
     con.register_table_function::<SamplesVTab>("pds_samples")?;
     con.register_table_function::<WideVTab>("read_pds")?;

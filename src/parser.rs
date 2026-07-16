@@ -598,11 +598,26 @@ impl PdsFile {
         let relative = time_ns.saturating_sub(chunk.time_base_ns);
         let sample = (relative / period_ns).min(chunk.sample_count - 1);
         let a = self.decode(channel, chunk, sample);
-        if !linear || !channel.sample_type.is_float() || sample + 1 >= chunk.sample_count {
+        if !linear || !channel.sample_type.is_float() {
             return Some(a);
         }
-        let b = self.decode(channel, chunk, sample + 1);
-        let fraction = (relative % period_ns) as f64 / period_ns as f64;
+
+        let sample_time_ns = chunk.time_base_ns + sample * period_ns;
+        let (b, next_time_ns) = if sample + 1 < chunk.sample_count {
+            (
+                self.decode(channel, chunk, sample + 1),
+                sample_time_ns + period_ns,
+            )
+        } else if let Some(next_chunk) = channel.chunks.get(idx + 1) {
+            (self.decode(channel, next_chunk, 0), next_chunk.time_base_ns)
+        } else {
+            return Some(a);
+        };
+        let interval_ns = next_time_ns.saturating_sub(sample_time_ns);
+        if interval_ns == 0 {
+            return Some(a);
+        }
+        let fraction = time_ns.saturating_sub(sample_time_ns) as f64 / interval_ns as f64;
         Some(a + (b - a) * fraction)
     }
 }
