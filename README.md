@@ -10,38 +10,34 @@ The exact model is two relations—channel metadata and native-rate samples—pl
 
 ## Easiest installation
 
-1. Download the ZIP for your platform from the [latest release](https://github.com/tobi/duckdb_motorsport_telemetry/releases/latest):
-   - Linux x86-64: `motorsport_telemetry-linux_amd64.zip`
-   - Windows x86-64: `motorsport_telemetry-windows_amd64.zip`
-   - Apple Silicon macOS: `motorsport_telemetry-osx_arm64.zip`
-2. Extract `motorsport_telemetry.duckdb_extension`.
-3. Start DuckDB with unsigned extensions enabled:
+Start DuckDB 1.4.3 with unsigned extensions enabled:
 
 ```sh
 duckdb -unsigned
 ```
 
-4. Load the extracted file directly using an absolute path:
+Install directly over HTTPS from this project's DuckDB extension repository:
 
 ```sql
-LOAD '/absolute/path/motorsport_telemetry.duckdb_extension';
+INSTALL motorsport_telemetry
+FROM 'https://tobi.github.io/duckdb_motorsport_telemetry';
+LOAD motorsport_telemetry;
 ```
 
-5. Verify it against a telemetry file:
+Verify it against a telemetry file:
 
 ```sql
 SELECT name, unit, frequency_hz, sample_count
 FROM telemetry_metadata('/path/to/run.pds');
 ```
 
-To copy the extension into DuckDB's extension directory for shorter subsequent loads:
+DuckDB downloads the platform-specific `.duckdb_extension.gz`, decompresses it, and installs it in the normal extension directory. Subsequent sessions only need:
 
 ```sql
-INSTALL '/absolute/path/motorsport_telemetry.duckdb_extension';
 LOAD motorsport_telemetry;
 ```
 
-GitHub release artifacts are unsigned, so DuckDB must still be started with `-unsigned`. See [Install from GitHub Releases](#install-from-github-releases) for platform-specific commands and Python usage.
+The repository artifacts are unsigned, so every DuckDB process loading the extension must still allow unsigned extensions. See [Install from GitHub Releases](#install-from-github-releases) for manual ZIP installation and Python usage.
 
 ## SQL in 30 seconds
 
@@ -292,7 +288,7 @@ It invokes the DuckDB CLI; the Python `duckdb` package is not required.
 
 ## Install from GitHub Releases
 
-Release archives contain a platform-native file named exactly `motorsport_telemetry.duckdb_extension`.
+The HTTPS `INSTALL ... FROM` command above is recommended. For manual or offline installation, release archives contain a platform-native file named exactly `motorsport_telemetry.duckdb_extension`.
 
 ### Linux x86-64
 

@@ -9,16 +9,15 @@ Use the extension's exact metadata/sample relations before choosing a wide resam
 
 ## Load
 
-Local GitHub builds are unsigned:
-
-```sh
-duckdb -unsigned
-```
+Published builds are unsigned. Start DuckDB 1.4.3 with `duckdb -unsigned`, then install over HTTPS:
 
 ```sql
-INSTALL '/absolute/path/motorsport_telemetry.duckdb_extension';
+INSTALL motorsport_telemetry
+FROM 'https://tobi.github.io/duckdb_motorsport_telemetry';
 LOAD motorsport_telemetry;
 ```
+
+For a manually downloaded release artifact, use `INSTALL '/absolute/path/motorsport_telemetry.duckdb_extension'` instead.
 
 ## Workflow
 

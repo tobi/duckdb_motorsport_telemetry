@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   build:
@@ -34,20 +36,22 @@ jobs:
         run: |
           python scripts/package_extension.py \
             --library '${{ matrix.library }}' \
-            --output 'dist/motorsport_telemetry.duckdb_extension' \
+            --output 'dist/${{ matrix.platform }}/motorsport_telemetry.duckdb_extension' \
             --platform '${{ matrix.platform }}' \
             --extension-version '${{ github.ref_name }}'
           python - <<'PY'
-          from pathlib import Path
           from zipfile import ZIP_DEFLATED, ZipFile
           platform = '${{ matrix.platform }}'
+          extension = f'dist/{platform}/motorsport_telemetry.duckdb_extension'
           with ZipFile(f'dist/motorsport_telemetry-{platform}.zip', 'w', ZIP_DEFLATED) as archive:
-              archive.write('dist/motorsport_telemetry.duckdb_extension', 'motorsport_telemetry.duckdb_extension')
+              archive.write(extension, 'motorsport_telemetry.duckdb_extension')
           PY
       - uses: actions/upload-artifact@v4
         with:
           name: motorsport_telemetry-${{ matrix.platform }}
-          path: dist/motorsport_telemetry-${{ matrix.platform }}.zip
+          path: |
+            dist/motorsport_telemetry-${{ matrix.platform }}.zip
+            dist/${{ matrix.platform }}/motorsport_telemetry.duckdb_extension
 
   publish:
     needs: build
@@ -62,3 +66,28 @@ jobs:
         with:
           generate_release_notes: true
           files: dist/*.zip
+
+  publish-extension-repository:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Build DuckDB extension repository
+        run: |
+          for platform in linux_amd64 windows_amd64 osx_arm64; do
+            mkdir -p "site/v1.4.3/$platform"
+            gzip -9 -c "dist/$platform/motorsport_telemetry.duckdb_extension" \
+              > "site/v1.4.3/$platform/motorsport_telemetry.duckdb_extension.gz"
+          done
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy extension repository
+        id: deployment
+        uses: actions/deploy-pages@v4
