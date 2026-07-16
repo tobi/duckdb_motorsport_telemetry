@@ -7,6 +7,7 @@ import './style.css';
 
 type Row = Record<string, unknown>;
 type QueryResult = { columns: string[]; rows: Row[]; elapsed: number; total: number };
+type Lap = { number: number; label: string; startNs: number; endNs: number; durationNs: number; complete: boolean };
 
 const BASE = '/duckdb_motorsport_telemetry/';
 const EXT_REPO = `${location.origin}${BASE.replace(/\/$/, '')}`;
@@ -22,13 +23,16 @@ let activeDisplayName = '';
 let metadata: Row[] = [];
 let plotRows: Row[] = [];
 let plotChannels: string[] = [];
+let laps: Lap[] = [];
+let activeLap: Lap | null = null;
+let inspectedChannel = '';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <header class="topbar">
     <a class="brand" href="${BASE}"><span class="mark">T<span>L</span></span><span>TELEMETRY <b>LAB</b></span></a>
     <div class="runtime"><i id="statusDot"></i><span id="runtimeText">Starting DuckDB-Wasm</span></div>
-    <a class="github" href="https://github.com/tobi/duckdb_motorsport_telemetry">SOURCE ↗</a>
+    <a class="github" href="https://github.com/tobi/duckdb_motorsport_telemetry" target="_blank" rel="noreferrer">GITHUB / SOURCE ↗</a>
   </header>
   <main>
     <section class="install-banner" aria-label="DuckDB installation">
@@ -64,9 +68,10 @@ app.innerHTML = `
       <div class="metric-grid" id="metrics"></div>
       <div class="analysis-grid">
         <article class="panel trace-panel">
-          <div class="panel-title"><div><span class="pulse"></span> QUICK TRACE</div><div id="traceLegend" class="legend"></div></div>
-          <canvas id="trace" height="260"></canvas>
-          <div class="axis-label">SESSION TIME →</div>
+          <div class="panel-title"><div><span class="pulse"></span> QUICK TRACE <b id="traceLapLabel"></b></div><div id="traceLegend" class="legend"></div></div>
+          <div class="lap-rail" id="lapRail"></div>
+          <div class="trace-stage"><canvas id="trace" height="260"></canvas><div class="scrubber hidden" id="scrubber"><i></i><div id="scrubValues"></div></div></div>
+          <div class="axis-label">SCRUB FOR INTERPOLATED VALUES · LAP TIME →</div>
         </article>
         <article class="panel findings-panel">
           <div class="panel-title">SIGNAL FINDINGS <span>EXACT SAMPLES</span></div>
@@ -76,7 +81,7 @@ app.innerHTML = `
 
       <div class="section-head"><div><span>02</span><h2>Channel map</h2></div><p>Source-exact names, units, and clocks</p></div>
       <div class="panel channel-panel">
-        <div class="channel-tools"><input id="channelSearch" placeholder="Filter channels…" /><span id="channelCount"></span></div>
+        <div class="channel-tools"><input id="channelSearch" placeholder="Filter channels…" /><small>CLICK A CHANNEL TO INSPECT THE SELECTED LAP</small><span id="channelCount"></span></div>
         <div class="table-wrap"><table><thead><tr><th>CHANNEL</th><th>UNIT</th><th>TYPE</th><th>NATIVE RATE</th><th>SAMPLES</th><th>DURATION</th></tr></thead><tbody id="channelRows"></tbody></table></div>
       </div>
 
@@ -92,9 +97,16 @@ app.innerHTML = `
           <div class="result-wrap" id="queryResult"><div class="empty-result">Run a query to inspect this recording.</div></div>
         </article>
       </div>
+      <div class="recipe-shelf"><div class="recipe-heading"><span>QUERY RECIPES</span><small>LOAD INTO THE EDITOR</small></div><div class="recipe-grid" id="recipeGrid"></div></div>
     </section>
   </main>
-  <footer><span>DUCKDB-WASM × RUST</span><span>NO SERVER · NO TRACKING · NO UPLOAD</span></footer>
+  <aside class="channel-inspector hidden" id="channelInspector">
+    <div class="inspector-head"><div><span>CHANNEL INSPECTOR · <b id="inspectorLap"></b></span><strong id="inspectorName">—</strong></div><button id="closeInspector" aria-label="Close channel inspector">×</button></div>
+    <div class="inspector-summary" id="inspectorSummary"></div>
+    <div class="inspector-shape"><div><span>VALUE SHAPE</span><canvas id="channelShape" height="120"></canvas></div><div><span>SAMPLE VALUES</span><div class="sample-list" id="sampleList"></div></div></div>
+  </aside>
+  <div class="inspector-scrim hidden" id="inspectorScrim"></div>
+  <footer><a href="https://github.com/tobi/duckdb_motorsport_telemetry" target="_blank" rel="noreferrer">GITHUB / TOBI / DUCKDB MOTORSPORT TELEMETRY ↗</a><span>DUCKDB-WASM × RUST · NO SERVER · NO TRACKING · NO UPLOAD</span></footer>
   <div class="toast hidden" id="toast"></div>
 `;
 
@@ -230,10 +242,68 @@ async function renderInsights() {
     <div class="finding"><div><strong>${row.channel}</strong><small>${row.samples} native samples · ${row.unit || 'unitless'}</small></div>
     <div class="range"><span>${formatNumber(row.minimum)}</span><b>${formatNumber(row.maximum)}</b></div></div>`).join('') : '<div class="no-signals">No conventional speed, pedal, acceleration, or gear channels were identified. Use SQL to inspect the exact channel names.</div>';
 
+  laps = await detectLaps(duration);
+  const complete = laps.filter((lap) => lap.complete && lap.durationNs > 5_000_000_000);
+  activeLap = complete.sort((a, b) => a.durationNs - b.durationNs)[0] || laps[0];
+  renderLapRail();
+  await loadLapTrace();
+}
+
+function lapCounterChannel(): string | null {
+  const sampled = metadata.filter((row) => Number(row.sample_count) > 0);
+  const normalized = (name: unknown) => String(name).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const priorities = ['lapnumber', 'lapnum', 'lapcount', 'lapcounter', 'currentlap', 'lap'];
+  for (const wanted of priorities) {
+    const match = sampled.find((row) => normalized(row.name) === wanted);
+    if (match) return String(match.name);
+  }
+  return null;
+}
+
+async function detectLaps(sessionDurationNs: number): Promise<Lap[]> {
+  const channel = lapCounterChannel();
+  if (channel) {
+    const starts = arrowRows(await conn.query(`
+      SELECT CAST(round(value) AS BIGINT) AS lap_number, min(time_ns) AS start_ns
+      FROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(channel)})
+      WHERE isfinite(value) AND value >= 0 AND value < 100000
+      GROUP BY 1 ORDER BY start_ns`));
+    if (starts.length > 1) {
+      return starts.map((row, index) => {
+        const startNs = Number(row.start_ns);
+        const endNs = index + 1 < starts.length ? Number(starts[index + 1].start_ns) : sessionDurationNs;
+        const number = Number(row.lap_number);
+        return { number, label: number > 0 ? `LAP ${number}` : `SEG ${index + 1}`, startNs, endNs, durationNs: Math.max(0, endNs - startNs), complete: index > 0 && index < starts.length - 1 };
+      }).filter((lap) => lap.durationNs > 0);
+    }
+  }
+  return [{ number: 1, label: 'SESSION', startNs: 0, endNs: sessionDurationNs, durationNs: sessionDurationNs, complete: true }];
+}
+
+function renderLapRail() {
+  if (!activeLap) return;
+  const complete = laps.filter((lap) => lap.complete && lap.durationNs > 5_000_000_000);
+  const best = complete.sort((a, b) => a.durationNs - b.durationNs)[0];
+  $('#lapRail').innerHTML = laps.map((lap, index) => `<button data-lap="${index}" class="${lap === activeLap ? 'active' : ''} ${!lap.complete ? 'partial' : ''}"><span>${lap.label}${lap === best ? '<b>BEST</b>' : ''}</span><strong>${formatDuration(lap.durationNs)}</strong></button>`).join('');
+  document.querySelectorAll<HTMLButtonElement>('[data-lap]').forEach((button) => button.onclick = () => selectLap(laps[Number(button.dataset.lap)]));
+  $('#traceLapLabel').textContent = `${activeLap.label} · ${formatDuration(activeLap.durationNs)}`;
+}
+
+async function selectLap(lap: Lap) {
+  activeLap = lap;
+  renderLapRail();
+  await loadLapTrace();
+  setPresets(true);
+  if (inspectedChannel) await inspectChannel(inspectedChannel);
+}
+
+async function loadLapTrace() {
   plotRows = [];
-  if (plotChannels.length && duration > 0) {
-    const rate = Math.min(20, Math.max(1, Math.ceil(10_000 / Math.max(duration / 1e9, 1))));
-    plotRows = arrowRows(await conn.query(`SELECT * FROM read_telemetry(${sqlLiteral(activeFile)}, rate := ${rate}, channels := ${sqlLiteral(plotChannels.join(','))})`));
+  $('#scrubber').classList.add('hidden');
+  if (activeLap && plotChannels.length && activeLap.durationNs > 0) {
+    const seconds = activeLap.durationNs / 1e9;
+    const rate = Math.min(100, Math.max(10, Math.ceil(5_000 / Math.max(seconds, 1))));
+    plotRows = arrowRows(await conn.query(`SELECT * FROM read_telemetry(${sqlLiteral(activeFile)}, rate := ${rate}, channels := ${sqlLiteral(plotChannels.join(','))}, start_ns := ${Math.round(activeLap.startNs)}, end_ns := ${Math.round(activeLap.endNs)})`));
   }
   drawTrace();
 }
@@ -262,22 +332,116 @@ function drawTrace() {
   });
 }
 
+function scrubTrace(clientX: number) {
+  if (!plotRows.length || !activeLap) return;
+  const canvas = $<HTMLCanvasElement>('#trace');
+  const rect = canvas.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  const row = plotRows[Math.round(ratio * (plotRows.length - 1))];
+  const elapsed = (Number(row.time_ns) - activeLap.startNs) / 1e9;
+  const scrubber = $('#scrubber');
+  scrubber.style.left = `${ratio * 100}%`;
+  $('#scrubValues').innerHTML = `<strong>+${elapsed.toFixed(3)} s</strong>${plotChannels.map((channel, index) => `<span><i style="background:${['#d8ff32', '#ff5c35', '#49b9ff'][index]}"></i>${escapeHtml(channel)} <b>${formatNumber(row[channel], 3)}</b></span>`).join('')}`;
+  scrubber.classList.remove('hidden');
+}
+
+async function inspectChannel(name: string) {
+  if (!activeLap) return;
+  inspectedChannel = name;
+  const meta = metadata.find((row) => String(row.name) === name);
+  if (!meta || Number(meta.sample_count) === 0) return;
+  $('#channelInspector').classList.remove('hidden');
+  $('#inspectorScrim').classList.remove('hidden');
+  $('#inspectorName').textContent = name;
+  $('#inspectorLap').textContent = activeLap.label;
+  $('#inspectorSummary').innerHTML = '<div class="inspector-loading">QUERYING EXACT SAMPLES…</div>';
+  const bounds = `start_ns := ${Math.round(activeLap.startNs)}, end_ns := ${Math.round(activeLap.endNs)}`;
+  try {
+    const stats = arrowRows(await conn.query(`
+      SELECT count(*) AS samples, min(value) AS minimum, avg(value) AS mean,
+             max(value) AS maximum, approx_count_distinct(value) AS distinct_values
+      FROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(name)}, ${bounds})`))[0];
+    const snippets = arrowRows(await conn.query(`
+      WITH source AS (
+        SELECT time_ns, value, row_number() OVER (ORDER BY time_ns) AS rn,
+               count(*) OVER () AS total
+        FROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(name)}, ${bounds})
+      )
+      SELECT (time_ns - ${Math.round(activeLap.startNs)}) / 1e9 AS lap_seconds, value
+      FROM source
+      WHERE (rn - 1) % greatest(1, CAST(ceil(total / 80.0) AS BIGINT)) = 0
+      ORDER BY time_ns LIMIT 80`));
+    const discreteName = /(gear|lap|switch|flag|state|status|event|alarm|beacon)/i.test(name);
+    const semantics = discreteName || !String(meta.data_type).startsWith('float') ? 'STEP / DISCRETE' : 'LINEAR / CONTINUOUS';
+    $('#inspectorSummary').innerHTML = [
+      ['STORAGE', String(meta.data_type), `${formatNumber(meta.frequency_hz)} Hz native`],
+      ['SEMANTICS', semantics, 'wide-reader interpolation'],
+      ['LAP RANGE', `${formatNumber(stats.minimum, 3)} → ${formatNumber(stats.maximum, 3)}`, String(meta.unit || 'unitless')],
+      ['LAP SAMPLES', formatNumber(stats.samples, 0), `≈ ${formatNumber(stats.distinct_values, 0)} distinct`],
+    ].map(([label, value, note]) => `<div><small>${label}</small><strong>${escapeHtml(value)}</strong><span>${escapeHtml(note)}</span></div>`).join('');
+    $('#sampleList').innerHTML = snippets.slice(0, 24).map((row) => `<div><span>+${Number(row.lap_seconds).toFixed(3)} s</span><b>${formatNumber(row.value, 5)}</b></div>`).join('') || '<div class="no-samples">No samples in this lap window.</div>';
+    drawChannelShape(snippets);
+  } catch (error) {
+    $('#inspectorSummary').innerHTML = `<div class="inspector-loading error">${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`;
+  }
+}
+
+function drawChannelShape(rows: Row[]) {
+  const canvas = $<HTMLCanvasElement>('#channelShape'); const rect = canvas.getBoundingClientRect(); const dpr = devicePixelRatio || 1;
+  canvas.width = Math.max(1, rect.width * dpr); canvas.height = 120 * dpr;
+  const ctx = canvas.getContext('2d')!; ctx.scale(dpr, dpr); ctx.clearRect(0, 0, rect.width, 120);
+  const values = rows.map((row) => Number(row.value)).filter(Number.isFinite); if (values.length < 2) return;
+  const min = Math.min(...values); const max = Math.max(...values); const span = max - min || 1;
+  ctx.strokeStyle = '#252b29'; for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(0, i * 30); ctx.lineTo(rect.width, i * 30); ctx.stroke(); }
+  ctx.strokeStyle = '#d8ff32'; ctx.lineWidth = 1.5; ctx.beginPath();
+  values.forEach((value, index) => { const x = index / (values.length - 1) * rect.width; const y = 8 + (1 - (value - min) / span) * 104; if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.stroke();
+}
+
+function closeInspector() {
+  inspectedChannel = '';
+  $('#channelInspector').classList.add('hidden');
+  $('#inspectorScrim').classList.add('hidden');
+}
+
 function renderChannels(rows: Row[]) {
   $('#channelCount').textContent = `${rows.filter((r) => Number(r.sample_count) > 0).length} RECORDED / ${rows.length} DEFINED`;
-  $('#channelRows').innerHTML = rows.map((row) => `<tr class="${Number(row.sample_count) ? '' : 'empty'}"><td><b>${escapeHtml(String(row.name))}</b></td><td>${escapeHtml(String(row.unit || '—'))}</td><td>${row.data_type}</td><td>${formatNumber(row.frequency_hz, 2)} Hz</td><td>${formatNumber(row.sample_count, 0)}</td><td>${formatDuration(row.duration_ns)}</td></tr>`).join('');
+  $('#channelRows').innerHTML = rows.map((row) => `<tr data-channel="${escapeHtml(String(row.name))}" class="${Number(row.sample_count) ? 'inspectable' : 'empty'}"><td><b>${escapeHtml(String(row.name))}</b></td><td>${escapeHtml(String(row.unit || '—'))}</td><td>${row.data_type}</td><td>${formatNumber(row.frequency_hz, 2)} Hz</td><td>${formatNumber(row.sample_count, 0)}</td><td>${formatDuration(row.duration_ns)}</td></tr>`).join('');
 }
 function escapeHtml(value: string) { const div = document.createElement('div'); div.textContent = value; return div.innerHTML; }
 
-function setPresets() {
+function setPresets(preserveEditor = false) {
   const candidates = candidateChannels(metadata);
   const first = candidates[0] || String(metadata.find((r) => Number(r.sample_count))?.name || '');
+  const lap = activeLap || { startNs: 0, endNs: 10_000_000_000, label: 'SESSION' };
+  const start = Math.round(lap.startNs); const end = Math.round(lap.endNs);
+  const find = (pattern: RegExp) => String(metadata.find((row) => Number(row.sample_count) > 0 && pattern.test(String(row.name)))?.name || '');
+  const speed = find(/speed|velocity/i) || first;
+  const throttle = find(/throttle|pedal/i);
+  const brake = find(/brake/i);
+  const gear = find(/(^|[^a-z])gear([^a-z]|$)/i);
+  const accel = find(/accel.*(long|lat)|g.?force|glong|glat/i) || first;
   const presets: Record<string, string> = {
     metadata: `SELECT name, unit, frequency_hz, sample_count\nFROM telemetry_metadata(${sqlLiteral(activeFile)})\nWHERE sample_count > 0\nORDER BY name;`,
-    stats: `SELECT channel, any_value(unit) AS unit,\n       count(*) AS samples, min(value), avg(value), max(value)\nFROM telemetry_samples(${sqlLiteral(activeFile)},\n     channel := ${sqlLiteral(candidates.join(','))})\nGROUP BY channel\nORDER BY channel;`,
-    samples: `SELECT time_ns / 1e9 AS seconds, value\nFROM telemetry_samples(${sqlLiteral(activeFile)},\n     channel := ${sqlLiteral(first)},\n     start_ns := 0, end_ns := 10000000000)\nORDER BY time_ns\nLIMIT 500;`,
+    stats: `SELECT channel, any_value(unit) AS unit,\n       count(*) AS samples, min(value), avg(value), max(value)\nFROM telemetry_samples(${sqlLiteral(activeFile)},\n     channel := ${sqlLiteral(candidates.join(','))},\n     start_ns := ${start}, end_ns := ${end})\nGROUP BY channel\nORDER BY channel;`,
+    samples: `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, value\nFROM telemetry_samples(${sqlLiteral(activeFile)},\n     channel := ${sqlLiteral(first)},\n     start_ns := ${start}, end_ns := ${end})\nORDER BY time_ns\nLIMIT 500;`,
   };
-  editor.value = presets.metadata; updateLines();
+  const recipes = [
+    ['Native rate audit', 'Compare logger clocks and volume', `SELECT frequency_hz, count(*) AS channels, sum(sample_count) AS samples\nFROM telemetry_metadata(${sqlLiteral(activeFile)})\nWHERE sample_count > 0\nGROUP BY frequency_hz ORDER BY frequency_hz DESC;`],
+    ['Current lap · wide', '100 Hz interpolated channel set', `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, * EXCLUDE (time_ns)\nFROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n     channels := ${sqlLiteral(candidates.join(','))},\n     start_ns := ${start}, end_ns := ${end})\nLIMIT 1000;`],
+    ['Percentile envelope', `Distribution of ${speed}`, `SELECT quantile_cont(value, [0, .01, .1, .5, .9, .99, 1]) AS percentiles\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(speed)},\n     start_ns := ${start}, end_ns := ${end});`],
+    ['Peak events', `Largest absolute ${accel} values`, `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, value\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(accel)},\n     start_ns := ${start}, end_ns := ${end})\nORDER BY abs(value) DESC LIMIT 20;`],
+    ['Fastest zones', `Top ${speed} samples`, `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, value\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(speed)},\n     start_ns := ${start}, end_ns := ${end})\nORDER BY value DESC LIMIT 25;`],
+    ['Channel coverage', 'Definitions with no physical samples', `SELECT name, unit, frequency_hz\nFROM telemetry_metadata(${sqlLiteral(activeFile)})\nWHERE sample_count = 0 ORDER BY name;`],
+    ['Gear usage', gear ? `Time distribution for ${gear}` : 'Adapt after selecting a gear channel', gear ? `SELECT ${quoteIdent(gear)} AS gear, count(*) / 100.0 AS seconds\nFROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100, channels := ${sqlLiteral(gear)},\n     start_ns := ${start}, end_ns := ${end})\nGROUP BY 1 ORDER BY 1;` : presets.samples],
+    ['Pedal overlap', brake && throttle ? `${brake} × ${throttle}` : 'Adapt after selecting pedal channels', brake && throttle ? `SELECT count(*) / 100.0 AS overlap_seconds\nFROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n     channels := ${sqlLiteral(`${brake},${throttle}`)}, start_ns := ${start}, end_ns := ${end})\nWHERE ${quoteIdent(brake)} > 0 AND ${quoteIdent(throttle)} > 0;` : presets.stats],
+    ['Discrete transitions', `Changes in ${gear || first}`, `WITH s AS (\n  SELECT time_ns, value, lag(value) OVER (ORDER BY time_ns) AS previous\n  FROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(gear || first)},\n       start_ns := ${start}, end_ns := ${end})\n) SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, previous, value\nFROM s WHERE value IS DISTINCT FROM previous ORDER BY time_ns;`],
+    ['Correlation', 'Relationship between selected signals', candidates.length > 1 ? `SELECT corr(${quoteIdent(candidates[0])}, ${quoteIdent(candidates[1])}) AS correlation\nFROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n     channels := ${sqlLiteral(candidates.slice(0, 2).join(','))}, start_ns := ${start}, end_ns := ${end});` : presets.stats],
+  ];
+  if (!preserveEditor) editor.value = presets.metadata;
+  updateLines();
   document.querySelectorAll<HTMLButtonElement>('[data-query]').forEach((button) => button.onclick = () => { editor.value = presets[button.dataset.query!]; updateLines(); });
+  $('#recipeGrid').innerHTML = recipes.map(([title, description], index) => `<button data-recipe="${index}"><span>0${index + 1}</span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small><b>LOAD ↗</b></button>`).join('');
+  document.querySelectorAll<HTMLButtonElement>('[data-recipe]').forEach((button) => button.onclick = () => { editor.value = recipes[Number(button.dataset.recipe)][2]; updateLines(); editor.scrollIntoView({ behavior: 'smooth', block: 'center' }); });
 }
 
 async function runQuery() {
@@ -315,6 +479,15 @@ $('#runQuery').addEventListener('click', runQuery);
 editor.addEventListener('input', updateLines);
 editor.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); runQuery(); } });
 $('#channelSearch').addEventListener('input', (event) => { const term = (event.target as HTMLInputElement).value.toLowerCase(); renderChannels(metadata.filter((row) => String(row.name).toLowerCase().includes(term) || String(row.unit).toLowerCase().includes(term))); });
+$('#channelRows').addEventListener('click', (event) => {
+  const row = (event.target as HTMLElement).closest<HTMLTableRowElement>('tr.inspectable');
+  if (row?.dataset.channel) inspectChannel(row.dataset.channel);
+});
+$('#closeInspector').addEventListener('click', closeInspector);
+$('#inspectorScrim').addEventListener('click', closeInspector);
+$('#trace').addEventListener('pointermove', (event) => scrubTrace(event.clientX));
+$('#trace').addEventListener('pointerdown', (event) => scrubTrace(event.clientX));
+$('#trace').addEventListener('pointerleave', () => $('#scrubber').classList.add('hidden'));
 const drop = $('#dropZone');
 for (const type of ['dragenter', 'dragover']) drop.addEventListener(type, (event) => { event.preventDefault(); drop.classList.add('dragging'); });
 for (const type of ['dragleave', 'drop']) drop.addEventListener(type, (event) => { event.preventDefault(); drop.classList.remove('dragging'); });

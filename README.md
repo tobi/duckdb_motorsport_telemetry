@@ -50,8 +50,11 @@ The lab runs this same Rust extension as a DuckDB-Wasm side module and automatic
 - recorded versus empty channel definitions
 - exact native rates, sample counts, units, and duration
 - likely speed, brake, throttle, acceleration, and gear signals
-- exact min/mean/max statistics and a quick synchronized trace
-- a full SQL workbench with useful starter queries
+- exact min/mean/max statistics and lap detection
+- a per-lap quick trace that defaults to the best complete lap
+- interactive scrubbing with interpolated values for every plotted channel
+- click-through channel inspection with exact samples from the selected lap
+- a full SQL workbench plus ten adaptive query recipes
 
 The browser smoke test generates synthetic PDS, MoTeC, and VBO files at runtime, drops each into Chromium, verifies parsing, and executes SQL. No real telemetry fixture is committed.
 
