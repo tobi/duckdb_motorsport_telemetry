@@ -287,9 +287,9 @@ INSTALL 'C:/absolute/path/motorsport_telemetry.duckdb_extension';
 LOAD motorsport_telemetry;
 ```
 
-### macOS Intel
+### macOS Apple Silicon
 
-Download `motorsport_telemetry-osx_amd64.zip`, extract it, start DuckDB with `-unsigned`, then use the same `INSTALL` and `LOAD` statements.
+Download `motorsport_telemetry-osx_arm64.zip`, extract it, start DuckDB with `-unsigned`, then use the same `INSTALL` and `LOAD` statements.
 
 GitHub artifacts are unsigned, so every process loading one must allow unsigned extensions. In Python:
 
