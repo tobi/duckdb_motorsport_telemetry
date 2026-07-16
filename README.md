@@ -8,6 +8,41 @@ A fast, vectorized DuckDB extension and reusable Rust parser workspace for:
 
 The exact model is two relations—channel metadata and native-rate samples—plus a friendly interpolated wide reader. Files are memory-mapped where possible, values decode directly into DuckDB vectors, scans are parallel, and projection pushdown avoids decoding channels a query does not use.
 
+## Easiest installation
+
+1. Download the ZIP for your platform from the [latest release](https://github.com/tobi/duckdb_motorsport_telemetry/releases/latest):
+   - Linux x86-64: `motorsport_telemetry-linux_amd64.zip`
+   - Windows x86-64: `motorsport_telemetry-windows_amd64.zip`
+   - Apple Silicon macOS: `motorsport_telemetry-osx_arm64.zip`
+2. Extract `motorsport_telemetry.duckdb_extension`.
+3. Start DuckDB with unsigned extensions enabled:
+
+```sh
+duckdb -unsigned
+```
+
+4. Load the extracted file directly using an absolute path:
+
+```sql
+LOAD '/absolute/path/motorsport_telemetry.duckdb_extension';
+```
+
+5. Verify it against a telemetry file:
+
+```sql
+SELECT name, unit, frequency_hz, sample_count
+FROM telemetry_metadata('/path/to/run.pds');
+```
+
+To copy the extension into DuckDB's extension directory for shorter subsequent loads:
+
+```sql
+INSTALL '/absolute/path/motorsport_telemetry.duckdb_extension';
+LOAD motorsport_telemetry;
+```
+
+GitHub release artifacts are unsigned, so DuckDB must still be started with `-unsigned`. See [Install from GitHub Releases](#install-from-github-releases) for platform-specific commands and Python usage.
+
 ## SQL in 30 seconds
 
 ```sql
