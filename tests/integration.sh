@@ -49,4 +49,10 @@ SELECT CASE WHEN (SELECT filename FROM read_pds('$fixture', channels='Speed', fi
 SELECT CASE WHEN (SELECT filename FROM read_pds('$fixture', channels='Speed', add_filename_as_column=true) LIMIT 1) = '$fixture' THEN true ELSE error('filename alias failed') END;"
 results="$("$DUCKDB" -unsigned -csv -noheader -c "$sql")"
 [[ "$(grep -c '^true$' <<<"$results")" = 7 ]]
+
+stats="$(python3 scripts/pds_stats.py "$fixture" --extension "$EXTENSION" --duckdb "$DUCKDB" --rate 2 --channels Speed)"
+grep -q '^Raw mixed-rate sample stats$' <<<"$stats"
+grep -q '^Interpolated wide stats at 2 Hz$' <<<"$stats"
+grep -q "$(basename "$fixture")" <<<"$stats"
+
 printf 'integration tests passed\n'

@@ -28,6 +28,33 @@ LOAD './build/release/pds.duckdb_extension';
 `make test` runs formatting, Rust tests, and a DuckDB integration test against a
 synthetic multi-chunk PDS file.
 
+## Stats script
+
+`scripts/pds_stats.py` exercises `pds_metadata`, exact `pds_samples`, and the
+interpolated `read_pds` facade. It reports file/channel counts, raw sample
+counts, native-rate distribution, and raw versus resampled min/mean/max for
+common driving channels. It uses the DuckDB CLI and has no third-party Python
+dependencies.
+
+```sh
+./scripts/pds_stats.py '../R04-MOSPORT/D3_R/**/*Run*_TL*.pds'
+./scripts/pds_stats.py run.pds --rate 50 \
+  --channels 'Speed_Ref,I_ACCEL_LONG,gear_pos'
+```
+
+Quote shell globs so the pattern reaches DuckDB unchanged. `**` is recursive.
+The equivalent SQL is:
+
+```sql
+SELECT filename, max("Speed_Ref")
+FROM read_pds('weekend/**/*.pds', channels := 'Speed_Ref', filename := true)
+GROUP BY filename;
+```
+
+Every matched file must use a supported PDS layout. In this workspace, a broad
+`**/*.pds` also matches the unsupported small `Telemetry/` snapshots; use a
+pattern such as `**/Offloaded/*.pds` until that layout is implemented.
+
 ## SQL API
 
 The exact relational model has two tables: channel metadata and raw samples.
