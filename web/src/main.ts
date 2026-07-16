@@ -31,6 +31,11 @@ app.innerHTML = `
     <a class="github" href="https://github.com/tobi/duckdb_motorsport_telemetry">SOURCE ↗</a>
   </header>
   <main>
+    <section class="install-banner" aria-label="DuckDB installation">
+      <div class="install-intro"><span>INSTALL / DUCKDB 1.4.3</span><strong>Use the extension in your own SQL</strong><small>Start DuckDB with <code>duckdb -unsigned</code>, then run:</small></div>
+      <code class="install-command">INSTALL httpfs; LOAD httpfs;<br>INSTALL motorsport_telemetry FROM 'https://pages.tobi.lutke.com/duckdb_motorsport_telemetry';<br>LOAD motorsport_telemetry;</code>
+      <button id="copyInstall" type="button">COPY SQL</button>
+    </section>
     <section class="hero" id="dropZone">
       <div class="hero-copy">
         <div class="eyebrow">LOCAL-FIRST · ZERO UPLOAD</div>
@@ -299,6 +304,11 @@ function displayCell(value: unknown): string {
 }
 function updateLines() { $('#lineNumbers').textContent = Array.from({ length: editor.value.split('\n').length }, (_, i) => i + 1).join('\n'); }
 
+$('#copyInstall').addEventListener('click', async () => {
+  const sql = `INSTALL httpfs;\nLOAD httpfs;\nINSTALL motorsport_telemetry FROM 'https://pages.tobi.lutke.com/duckdb_motorsport_telemetry';\nLOAD motorsport_telemetry;`;
+  await navigator.clipboard.writeText(sql);
+  toast('Installation SQL copied');
+});
 input.addEventListener('change', () => input.files?.[0] && loadFile(input.files[0]));
 $('#replaceFile').addEventListener('click', () => input.click());
 $('#runQuery').addEventListener('click', runQuery);
