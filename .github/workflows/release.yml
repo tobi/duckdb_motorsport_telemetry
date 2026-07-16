@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux_amd64
+            library: target/release/libmotorsport_telemetry.so
+          - os: windows-latest
+            platform: windows_amd64
+            library: target/release/motorsport_telemetry.dll
+          - os: macos-13
+            platform: osx_amd64
+            library: target/release/libmotorsport_telemetry.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p duckdb-motorsport-telemetry
+      - name: Package DuckDB extension
+        shell: bash
+        run: |
+          python scripts/package_extension.py \
+            --library '${{ matrix.library }}' \
+            --output 'dist/motorsport_telemetry.duckdb_extension' \
+            --platform '${{ matrix.platform }}' \
+            --extension-version '${{ github.ref_name }}'
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+          platform = '${{ matrix.platform }}'
+          with ZipFile(f'dist/motorsport_telemetry-{platform}.zip', 'w', ZIP_DEFLATED) as archive:
+              archive.write('dist/motorsport_telemetry.duckdb_extension', 'motorsport_telemetry.duckdb_extension')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: motorsport_telemetry-${{ matrix.platform }}
+          path: dist/motorsport_telemetry-${{ matrix.platform }}.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          generate_release_notes: true
+          files: dist/*.zip

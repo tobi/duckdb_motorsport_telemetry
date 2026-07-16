@@ -1,151 +1,27 @@
-use glob::glob;
 use memmap2::Mmap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 use thiserror::Error;
+
+use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource};
 
 pub const TICK_NS: u64 = 100;
 const MARKER: u64 = 0x7c72;
 
 #[derive(Debug, Error)]
-pub enum PdsError {
+pub enum CosworthError {
     #[error("I/O error for {path}: {source}")]
     Io {
         path: String,
         source: std::io::Error,
     },
-    #[error("invalid glob {pattern}: {source}")]
-    Glob {
-        pattern: String,
-        source: glob::PatternError,
-    },
-    #[error("no files matched {0}")]
-    NoFiles(String),
     #[error("invalid PDS file {path}: {message}")]
     Invalid { path: String, message: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SampleType {
-    U8,
-    I16,
-    U16,
-    I32,
-    U32,
-    F32,
-    F64,
-}
-
-impl SampleType {
-    pub fn from_code(code: u32) -> Self {
-        match code {
-            1 => Self::U8,
-            2 => Self::I16,
-            3 => Self::U16,
-            4 => Self::I32,
-            5 => Self::U32,
-            7 => Self::F64,
-            _ => Self::F32,
-        }
-    }
-
-    pub fn code(self) -> u32 {
-        match self {
-            Self::U8 => 1,
-            Self::I16 => 2,
-            Self::U16 => 3,
-            Self::I32 => 4,
-            Self::U32 => 5,
-            Self::F32 => 6,
-            Self::F64 => 7,
-        }
-    }
-
-    pub fn byte_width(self) -> usize {
-        match self {
-            Self::U8 => 1,
-            Self::I16 | Self::U16 => 2,
-            Self::I32 | Self::U32 | Self::F32 => 4,
-            Self::F64 => 8,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::U8 => "uint8",
-            Self::I16 => "int16",
-            Self::U16 => "uint16",
-            Self::I32 => "int32",
-            Self::U32 => "uint32",
-            Self::F32 => "float32",
-            Self::F64 => "float64",
-        }
-    }
-
-    pub fn is_float(self) -> bool {
-        matches!(self, Self::F32 | Self::F64)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Chunk {
-    pub sample_period_ticks: u32,
-    pub sample_count: u64,
-    pub data_ptr: u64,
-    pub sample_base: u64,
-    pub time_base_ns: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct Channel {
-    pub id: u32,
-    pub name: String,
-    pub unit: String,
-    pub sample_type: SampleType,
-    pub chunks: Vec<Chunk>,
-    pub sample_count: u64,
-    pub duration_ns: u64,
-}
-
-impl Channel {
-    pub fn first_period_ticks(&self) -> Option<u32> {
-        self.chunks.first().map(|c| c.sample_period_ticks)
-    }
-
-    pub fn frequency_hz(&self) -> Option<f64> {
-        self.first_period_ticks().map(|p| 10_000_000.0 / p as f64)
-    }
-
-    fn uses_step_interpolation(&self) -> bool {
-        if !self.sample_type.is_float() {
-            return true;
-        }
-        let name = self
-            .name
-            .to_ascii_lowercase()
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect::<String>();
-        [
-            "gear",
-            "lapnumber",
-            "lapbeacon",
-            "laptrigger",
-            "switch",
-            "status",
-            "state",
-            "flag",
-            "alarm",
-        ]
-        .iter()
-        .any(|token| name.contains(token))
-    }
-}
-
 #[derive(Debug)]
-pub struct PdsFile {
+pub struct CosworthFile {
     pub path: String,
     pub channels: Vec<Channel>,
     data: Mmap,
@@ -184,8 +60,8 @@ struct RawChunk {
     data_ptr: u64,
 }
 
-fn invalid(path: &str, message: impl Into<String>) -> PdsError {
-    PdsError::Invalid {
+fn invalid(path: &str, message: impl Into<String>) -> CosworthError {
+    CosworthError::Invalid {
         path: path.to_owned(),
         message: message.into(),
     }
@@ -291,7 +167,11 @@ fn find_directory(data: &[u8]) -> Vec<DirEntry> {
     best
 }
 
-fn find_layout(entries: &[DirEntry], file_size: usize, path: &str) -> Result<Layout, PdsError> {
+fn find_layout(
+    entries: &[DirEntry],
+    file_size: usize,
+    path: &str,
+) -> Result<Layout, CosworthError> {
     for window in entries.windows(3) {
         let defs = window[0];
         let chunks = window[1];
@@ -364,7 +244,7 @@ fn marker_defs(data: &[u8], layout: Layout) -> Vec<ChannelDef> {
                     id,
                     name,
                     unit,
-                    sample_type: SampleType::from_code(u32le(data, pos + 0xd8).unwrap_or(6)),
+                    sample_type: SampleType::from_pds_code(u32le(data, pos + 0xd8).unwrap_or(6)),
                 });
             }
         }
@@ -414,7 +294,7 @@ fn markerless_defs(data: &[u8], layout: Layout, is_export: bool) -> Vec<ChannelD
             id,
             name,
             unit,
-            sample_type: SampleType::from_code(code),
+            sample_type: SampleType::from_pds_code(code),
         });
     }
     defs
@@ -500,14 +380,15 @@ fn parse_chunks(data: &[u8], layout: Layout, is_export: bool) -> Vec<RawChunk> {
     out
 }
 
-impl PdsFile {
-    pub fn open(path: &Path) -> Result<Arc<Self>, PdsError> {
+impl CosworthFile {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, CosworthError> {
+        let path = path.as_ref();
         let display = path.to_string_lossy().into_owned();
-        let file = File::open(path).map_err(|source| PdsError::Io {
+        let file = File::open(path).map_err(|source| CosworthError::Io {
             path: display.clone(),
             source,
         })?;
-        let data = unsafe { Mmap::map(&file) }.map_err(|source| PdsError::Io {
+        let data = unsafe { Mmap::map(&file) }.map_err(|source| CosworthError::Io {
             path: display.clone(),
             source,
         })?;
@@ -551,7 +432,7 @@ impl PdsFile {
                         continue;
                     }
                     chunks.push(Chunk {
-                        sample_period_ticks: chunk.sample_period_ticks,
+                        sample_period_ns: chunk.sample_period_ticks as u64 * TICK_NS,
                         sample_count: count,
                         data_ptr: chunk.data_ptr,
                         sample_base,
@@ -575,15 +456,31 @@ impl PdsFile {
                 duration_ns: time_base_ns,
             });
         }
-        Ok(Arc::new(Self {
+        Ok(Self {
             path: display,
             channels,
             data,
-        }))
+        })
+    }
+}
+
+impl TelemetrySource for CosworthFile {
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn format(&self) -> &'static str {
+        "pds"
+    }
+
+    fn channels(&self) -> &[Channel] {
+        &self.channels
     }
 
     #[inline]
-    pub fn decode(&self, channel: &Channel, chunk: &Chunk, local_index: u64) -> f64 {
+    fn decode(&self, channel_index: usize, chunk_index: usize, local_index: u64) -> f64 {
+        let channel = &self.channels[channel_index];
+        let chunk = &channel.chunks[chunk_index];
         let offset =
             chunk.data_ptr as usize + local_index as usize * channel.sample_type.byte_width();
         match channel.sample_type {
@@ -608,107 +505,134 @@ impl PdsFile {
             }
         }
     }
-
-    pub fn sample_at(&self, channel: &Channel, time_ns: u64, linear: bool) -> Option<f64> {
-        if time_ns >= channel.duration_ns || channel.chunks.is_empty() {
-            return None;
-        }
-        let idx = channel.chunks.partition_point(|c| {
-            c.time_base_ns
-                .saturating_add(c.sample_count * c.sample_period_ticks as u64 * TICK_NS)
-                <= time_ns
-        });
-        let chunk = channel.chunks.get(idx)?;
-        let period_ns = chunk.sample_period_ticks as u64 * TICK_NS;
-        let relative = time_ns.saturating_sub(chunk.time_base_ns);
-        let sample = (relative / period_ns).min(chunk.sample_count - 1);
-        let a = self.decode(channel, chunk, sample);
-        if !linear || channel.uses_step_interpolation() {
-            return Some(a);
-        }
-
-        let sample_time_ns = chunk.time_base_ns + sample * period_ns;
-        let (b, next_time_ns) = if sample + 1 < chunk.sample_count {
-            (
-                self.decode(channel, chunk, sample + 1),
-                sample_time_ns + period_ns,
-            )
-        } else if let Some(next_chunk) = channel.chunks.get(idx + 1) {
-            (self.decode(channel, next_chunk, 0), next_chunk.time_base_ns)
-        } else {
-            return Some(a);
-        };
-        let interval_ns = next_time_ns.saturating_sub(sample_time_ns);
-        if interval_ns == 0 {
-            return Some(a);
-        }
-        let fraction = time_ns.saturating_sub(sample_time_ns) as f64 / interval_ns as f64;
-        Some(a + (b - a) * fraction)
-    }
-}
-
-pub fn expand_paths(pattern: &str) -> Result<Vec<PathBuf>, PdsError> {
-    let has_magic = pattern
-        .as_bytes()
-        .iter()
-        .any(|b| matches!(b, b'*' | b'?' | b'['));
-    let mut paths = if has_magic {
-        glob(pattern)
-            .map_err(|source| PdsError::Glob {
-                pattern: pattern.into(),
-                source,
-            })?
-            .filter_map(Result::ok)
-            .filter(|p| p.is_file())
-            .collect::<Vec<_>>()
-    } else {
-        vec![PathBuf::from(pattern)]
-    };
-    paths.sort();
-    paths.dedup();
-    if paths.is_empty() {
-        return Err(PdsError::NoFiles(pattern.into()));
-    }
-    Ok(paths)
-}
-
-pub fn open_paths(pattern: &str) -> Result<Vec<Arc<PdsFile>>, PdsError> {
-    expand_paths(pattern)?
-        .iter()
-        .map(|p| PdsFile::open(p))
-        .collect()
-}
-
-pub fn parse_channel_filter(value: Option<&str>) -> HashSet<String> {
-    value
-        .unwrap_or("")
-        .split(',')
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
-    fn channel(name: &str, sample_type: SampleType) -> Channel {
-        Channel {
-            id: 1,
-            name: name.into(),
-            unit: String::new(),
-            sample_type,
-            chunks: Vec::new(),
-            sample_count: 0,
-            duration_ns: 0,
+    fn u32_at(data: &mut [u8], offset: usize, value: u32) {
+        data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    fn utf16_at(data: &mut [u8], offset: usize, value: &str) {
+        for (index, unit) in value.encode_utf16().enumerate() {
+            data[offset + index * 2..offset + index * 2 + 2].copy_from_slice(&unit.to_le_bytes());
         }
+    }
+    fn directory(data: &mut [u8], at: usize, offset: u32, count: u32, class_b: u32, next: u32) {
+        u32_at(data, at, offset);
+        u32_at(data, at + 8, count);
+        u32_at(data, at + 0x10, 8);
+        u32_at(data, at + 0x14, class_b);
+        u32_at(data, at + 0x18, next);
+    }
+    fn fixture() -> tempfile::NamedTempFile {
+        let mut data = vec![0u8; 0x700];
+        let defs = 0x200;
+        let chunks = 0x380;
+        directory(&mut data, 0x80, defs, 2, 1, 4);
+        directory(&mut data, 0xa0, chunks, 4, 3, 0);
+        directory(&mut data, 0xc0, 0x480, 0, 1, 0);
+        for (index, (id, name)) in [(1, "Speed"), (2, "Gear")].into_iter().enumerate() {
+            let at = defs as usize + index * 0xc0;
+            u32_at(&mut data, at, id);
+            utf16_at(&mut data, at + 8, name);
+        }
+        for (index, (order, id, values)) in [
+            (100, 1, [10.0_f64, 11.0]),
+            (200, 2, [3.0, 3.0]),
+            (1, 1, [12.0, 13.0]),
+            (2, 2, [4.0, 4.0]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = chunks as usize + index * 0x40;
+            let ptr = 0x580 + index * 0x20;
+            u32_at(&mut data, at, order);
+            u32_at(&mut data, at + 4, id);
+            u32_at(&mut data, at + 8, id);
+            u32_at(&mut data, at + 0x18, 10_000_000);
+            u32_at(&mut data, at + 0x1c, 2);
+            u32_at(&mut data, at + 0x38, ptr as u32);
+            for (sample, value) in values.into_iter().enumerate() {
+                data[ptr + sample * 8..ptr + sample * 8 + 8].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&data).unwrap();
+        file
     }
 
     #[test]
-    fn discrete_channels_use_step_interpolation_even_when_stored_as_float() {
-        assert!(channel("Gear_Pos", SampleType::F32).uses_step_interpolation());
-        assert!(channel("Lap Beacon", SampleType::F32).uses_step_interpolation());
-        assert!(!channel("Speed_Ref", SampleType::F32).uses_step_interpolation());
-        assert!(channel("Speed_Ref", SampleType::I32).uses_step_interpolation());
+    fn preserves_chunk_table_order_and_interpolates() {
+        let fixture = fixture();
+        let file = CosworthFile::open(fixture.path()).unwrap();
+        assert_eq!(file.channels.len(), 2);
+        assert_eq!(file.channels[0].sample_count, 4);
+        let values = (0..4)
+            .map(|index| file.decode(0, usize::from(index >= 2), index % 2))
+            .collect::<Vec<_>>();
+        assert_eq!(values, [10.0, 11.0, 12.0, 13.0]);
+        assert_eq!(file.sample_at(0, 1_500_000_000, true), Some(11.5));
+        assert_eq!(file.sample_at(1, 2_500_000_000, true), Some(4.0));
+    }
+
+    #[test]
+    fn decodes_native_markerless_type_codes() {
+        let defs = 0x200usize;
+        let stride = 0xe0usize;
+        let chunks = defs + stride * 201;
+        let end = chunks + 0x80;
+        let mut data = vec![0u8; end + 0x80];
+        directory(&mut data, 0x80, defs as u32, 201, 1, 2);
+        directory(&mut data, 0xa0, chunks as u32, 2, 3, 0);
+        directory(&mut data, 0xc0, end as u32, 0, 1, 0);
+        for (index, (id, name, type_code)) in [(1, "Float channel", 6), (2, "Signed channel", 2)]
+            .into_iter()
+            .enumerate()
+        {
+            let at = defs + index * stride;
+            u32_at(&mut data, at, id);
+            utf16_at(&mut data, at + 8, name);
+            u32_at(&mut data, at + 0xd0, type_code);
+            let chunk = chunks + index * 0x40;
+            let ptr = end + index * 0x20;
+            u32_at(&mut data, chunk, index as u32);
+            u32_at(&mut data, chunk + 4, id);
+            u32_at(&mut data, chunk + 8, id);
+            u32_at(&mut data, chunk + 0x18, 10_000_000);
+            u32_at(&mut data, chunk + 0x1c, 2);
+            u32_at(&mut data, chunk + 0x38, ptr as u32);
+            if type_code == 6 {
+                for (sample, value) in [1.5_f32, -2.25].into_iter().enumerate() {
+                    data[ptr + sample * 4..ptr + sample * 4 + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+            } else {
+                for (sample, value) in [-30_000_i16, 30_000].into_iter().enumerate() {
+                    data[ptr + sample * 2..ptr + sample * 2 + 2]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        let mut fixture = tempfile::NamedTempFile::new().unwrap();
+        fixture.write_all(&data).unwrap();
+        let file = CosworthFile::open(fixture.path()).unwrap();
+        assert_eq!(file.channels[0].sample_type, SampleType::F32);
+        assert_eq!(file.decode(0, 0, 1), -2.25);
+        assert_eq!(file.channels[1].sample_type, SampleType::I16);
+        assert_eq!(file.decode(1, 0, 0), -30_000.0);
+    }
+
+    #[test]
+    fn rejects_short_files() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"not pds").unwrap();
+        assert!(matches!(
+            CosworthFile::open(file.path()),
+            Err(CosworthError::Invalid { .. })
+        ));
     }
 }

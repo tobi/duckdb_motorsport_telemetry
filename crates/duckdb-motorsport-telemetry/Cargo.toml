@@ -1,0 +1,24 @@
+[package]
+name = "duckdb-motorsport-telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DuckDB extension for PDS, MoTeC LD, and VBOX VBO telemetry"
+
+[lib]
+name = "motorsport_telemetry"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+motorsport-telemetry-core.workspace = true
+cosworth-telemetry.workspace = true
+motec-telemetry.workspace = true
+vbo-telemetry.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+duckdb = { version = "=1.4.3", features = ["vtab-loadable", "loadable-extension"] }
+duckdb-loadable-macros = "=0.1.13"
+glob = "0.3"
+libduckdb-sys = { version = "=1.4.3", features = ["loadable-extension"] }
+thiserror.workspace = true

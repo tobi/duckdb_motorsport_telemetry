@@ -1,12 +1,12 @@
 DUCKDB ?= duckdb
 PROFILE ?= release
-EXTENSION_VERSION ?= v0.1.0
+EXTENSION_VERSION ?= v0.2.0
 PLATFORM ?= $(shell $(DUCKDB) -csv -noheader -c "PRAGMA platform;")
 CARGO_FLAGS := $(if $(filter release,$(PROFILE)),--release,)
 TARGET_DIR := target/$(PROFILE)
 BUILD_DIR := build/$(PROFILE)
-SHARED_LIB := $(TARGET_DIR)/libpds.$(if $(filter Darwin,$(shell uname -s)),dylib,so)
-EXTENSION := $(BUILD_DIR)/pds.duckdb_extension
+SHARED_LIB := $(TARGET_DIR)/libmotorsport_telemetry.$(if $(filter Darwin,$(shell uname -s)),dylib,so)
+EXTENSION := $(BUILD_DIR)/motorsport_telemetry.duckdb_extension
 
 .PHONY: all build test integration-test clean
 

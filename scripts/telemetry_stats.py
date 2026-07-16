@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise duckdb-pds and print useful metadata, raw, and resampled stats.
+"""Exercise duckdb-motorsport-telemetry and print useful metadata, raw, and resampled stats.
 
 This intentionally uses the DuckDB CLI instead of the optional Python duckdb
 package, so it has no Python dependencies beyond the standard library.
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_EXTENSION = ROOT / "build" / "release" / "pds.duckdb_extension"
+DEFAULT_EXTENSION = ROOT / "build" / "release" / "motorsport_telemetry.duckdb_extension"
 
 
 def sql_string(value: str | Path) -> str:
@@ -196,7 +196,7 @@ def raw_stats(duckdb: str, extension: Path, pattern: str, channels: list[str]) -
                min(value) FILTER (WHERE isfinite(value)) AS min,
                avg(value) FILTER (WHERE isfinite(value)) AS mean,
                max(value) FILTER (WHERE isfinite(value)) AS max
-        FROM pds_samples({sql_string(pattern)}, channel := {sql_string(selected)})
+        FROM telemetry_samples({sql_string(pattern)}, channel := {sql_string(selected)})
         GROUP BY file, channel
         ORDER BY file, channel
         """,
@@ -231,7 +231,7 @@ def interpolated_stats(
         extension,
         f"""
         WITH telemetry AS MATERIALIZED (
-            SELECT * FROM read_pds(
+            SELECT * FROM read_telemetry(
                 {sql_string(pattern)}, rate := {rate}, channels := {sql_string(selected)},
                 interpolate := 'linear', filename := true
             )
@@ -251,9 +251,9 @@ def interpolated_stats(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Print common metadata, raw-sample, and interpolated stats for PDS files."
+        description="Print common metadata, raw-sample, and interpolated stats for telemetry files."
     )
-    parser.add_argument("path", help="PDS path or quoted glob, e.g. '**/Offloaded/*.pds'")
+    parser.add_argument("path", help="telemetry path or quoted glob, e.g. '**/*.{pds,ld,vbo}'")
     parser.add_argument("--extension", type=Path, default=DEFAULT_EXTENSION)
     parser.add_argument("--duckdb", default="duckdb", help="DuckDB CLI executable")
     parser.add_argument("--rate", type=int, default=100, help="wide resampling rate in Hz")
@@ -280,7 +280,7 @@ def main() -> int:
         metadata = query(
             args.duckdb,
             args.extension.resolve(),
-            f"SELECT * FROM pds_metadata({sql_string(args.path)}) ORDER BY file, channel_id",
+            f"SELECT * FROM telemetry_metadata({sql_string(args.path)}) ORDER BY file, channel_id",
         )
         channels = choose_channels(metadata, args.channels)
         metadata_summary(metadata)
