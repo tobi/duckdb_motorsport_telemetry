@@ -15,7 +15,7 @@ Published builds are unsigned. Start DuckDB 1.4.3 with `duckdb -unsigned`, then 
 INSTALL httpfs;
 LOAD httpfs;
 INSTALL motorsport_telemetry
-FROM 'https://tobi.github.io/duckdb_motorsport_telemetry';
+FROM 'https://pages.tobi.lutke.com/duckdb_motorsport_telemetry';
 LOAD motorsport_telemetry;
 ```
 
