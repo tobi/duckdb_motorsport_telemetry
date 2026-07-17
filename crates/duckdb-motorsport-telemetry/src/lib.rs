@@ -159,6 +159,7 @@ fn expand_paths(pattern: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
 struct InputFile {
     source: SourceRef,
     create_date_micros: i64,
+    modified_at_micros: i64,
 }
 
 impl Deref for InputFile {
@@ -173,14 +174,20 @@ struct ReaderConfig {
     format: Option<&'static str>,
 }
 
-fn create_date_micros(path: &Path) -> i64 {
-    let timestamp = std::fs::metadata(path)
-        .ok()
-        .and_then(|metadata| metadata.created().or_else(|_| metadata.modified()).ok());
+fn system_time_micros(timestamp: Option<std::time::SystemTime>) -> i64 {
     timestamp
         .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_micros().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
+}
+
+fn file_timestamps(path: &Path) -> (i64, i64) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return (0, 0);
+    };
+    let modified = metadata.modified().ok();
+    let created = metadata.created().ok().or(modified);
+    (system_time_micros(created), system_time_micros(modified))
 }
 
 #[cfg(target_os = "emscripten")]
@@ -280,7 +287,7 @@ fn open_paths(
         if required_format.is_some_and(|required| required != format) {
             continue;
         }
-        let created = create_date_micros(&path);
+        let (created, modified) = file_timestamps(&path);
         if create_date_from.is_some_and(|from| created < from)
             || create_date_to.is_some_and(|to| created >= to)
         {
@@ -307,6 +314,7 @@ fn open_paths(
         result.push(InputFile {
             source,
             create_date_micros: created,
+            modified_at_micros: modified,
         });
     }
     if result.is_empty() {
@@ -677,6 +685,7 @@ struct WideBind {
     linear: bool,
     include_filename: bool,
     include_create_date: bool,
+    include_modified_at: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -731,7 +740,11 @@ impl VTab for WideVTab {
         // more explicit spelling as an alias for callers that use it already.
         let include_filename = named_bool(bind, "filename").unwrap_or(false)
             || named_bool(bind, "add_filename_as_column").unwrap_or(false);
-        let include_create_date = named_bool(bind, "add_create_date_column").unwrap_or(false);
+        let include_timestamps = named_bool(bind, "timestamps").unwrap_or(false);
+        let include_create_date =
+            include_timestamps || named_bool(bind, "add_create_date_as_column").unwrap_or(false);
+        let include_modified_at =
+            include_timestamps || named_bool(bind, "add_modified_at_as_column").unwrap_or(false);
 
         let mut names = Vec::new();
         let mut keys = HashSet::new();
@@ -765,6 +778,9 @@ impl VTab for WideVTab {
         }
         if include_create_date {
             bind.add_result_column("create_date", ty(LogicalTypeId::Timestamp));
+        }
+        if include_modified_at {
+            bind.add_result_column("modified_at", ty(LogicalTypeId::Timestamp));
         }
         bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
         for name in &names {
@@ -815,6 +831,7 @@ impl VTab for WideVTab {
             linear: interpolation == "linear",
             include_filename,
             include_create_date,
+            include_modified_at,
         })
     }
 
@@ -834,8 +851,10 @@ impl VTab for WideVTab {
             }
         }
         init.set_max_threads(worker_count(segments.len()));
-        let fixed_columns =
-            1 + usize::from(bind.include_filename) + usize::from(bind.include_create_date);
+        let fixed_columns = 1
+            + usize::from(bind.include_filename)
+            + usize::from(bind.include_create_date)
+            + usize::from(bind.include_modified_at);
         Ok(WideInit {
             next: AtomicUsize::new(0),
             segments,
@@ -862,7 +881,8 @@ impl VTab for WideVTab {
                 break;
             }
             let create_date_column = u64::from(bind.include_filename);
-            let time_column = create_date_column + u64::from(bind.include_create_date);
+            let modified_at_column = create_date_column + u64::from(bind.include_create_date);
+            let time_column = modified_at_column + u64::from(bind.include_modified_at);
             let channel_offset = time_column + 1;
             match original {
                 0 if bind.include_filename => {
@@ -874,6 +894,10 @@ impl VTab for WideVTab {
                 col if bind.include_create_date && col == create_date_column => {
                     output.flat_vector(out_col).typed_slice::<i64>()[..n]
                         .fill(file.create_date_micros);
+                }
+                col if bind.include_modified_at && col == modified_at_column => {
+                    output.flat_vector(out_col).typed_slice::<i64>()[..n]
+                        .fill(file.modified_at_micros);
                 }
                 col if col == time_column => {
                     let mut vector = output.flat_vector(out_col);
@@ -930,7 +954,15 @@ impl VTab for WideVTab {
             ("interpolate".into(), ty(LogicalTypeId::Varchar)),
             ("filename".into(), ty(LogicalTypeId::Boolean)),
             ("add_filename_as_column".into(), ty(LogicalTypeId::Boolean)),
-            ("add_create_date_column".into(), ty(LogicalTypeId::Boolean)),
+            ("timestamps".into(), ty(LogicalTypeId::Boolean)),
+            (
+                "add_create_date_as_column".into(),
+                ty(LogicalTypeId::Boolean),
+            ),
+            (
+                "add_modified_at_as_column".into(),
+                ty(LogicalTypeId::Boolean),
+            ),
             ("create_date_from".into(), ty(LogicalTypeId::Timestamp)),
             ("create_date_to".into(), ty(LogicalTypeId::Timestamp)),
         ])

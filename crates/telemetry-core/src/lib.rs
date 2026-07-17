@@ -191,11 +191,69 @@ mod tests {
         }
     }
 
+    struct TestSource {
+        channel: Channel,
+        values: [f64; 2],
+    }
+
+    impl TelemetrySource for TestSource {
+        fn path(&self) -> &str {
+            "test"
+        }
+        fn format(&self) -> &'static str {
+            "test"
+        }
+        fn channels(&self) -> &[Channel] {
+            std::slice::from_ref(&self.channel)
+        }
+        fn decode(&self, _channel_index: usize, _chunk_index: usize, local_index: u64) -> f64 {
+            self.values[local_index as usize]
+        }
+    }
+
+    fn two_sample_source(sample_type: SampleType) -> TestSource {
+        TestSource {
+            channel: Channel {
+                id: 1,
+                name: "Speed".into(),
+                unit: String::new(),
+                sample_type,
+                chunks: vec![Chunk {
+                    sample_period_ns: 1_000_000_000,
+                    sample_count: 2,
+                    data_ptr: 0,
+                    sample_base: 0,
+                    time_base_ns: 0,
+                }],
+                sample_count: 2,
+                duration_ns: 2_000_000_000,
+            },
+            values: [10.0, 20.0],
+        }
+    }
+
     #[test]
     fn discrete_channels_use_step_interpolation_even_when_stored_as_float() {
         assert!(channel("Gear_Pos", SampleType::F32).uses_step_interpolation());
         assert!(channel("Lap Beacon", SampleType::F32).uses_step_interpolation());
         assert!(!channel("Speed_Ref", SampleType::F32).uses_step_interpolation());
-        assert!(channel("Speed_Ref", SampleType::I32).uses_step_interpolation());
+        assert!(!channel("Speed_Ref", SampleType::F64).uses_step_interpolation());
+        for sample_type in [
+            SampleType::U8,
+            SampleType::I16,
+            SampleType::U16,
+            SampleType::I32,
+            SampleType::U32,
+        ] {
+            assert!(channel("Speed_Ref", sample_type).uses_step_interpolation());
+        }
+    }
+
+    #[test]
+    fn linear_mode_never_interpolates_integer_source_channels() {
+        let integer = two_sample_source(SampleType::I32);
+        let float = two_sample_source(SampleType::F32);
+        assert_eq!(integer.sample_at(0, 500_000_000, true), Some(10.0));
+        assert_eq!(float.sample_at(0, 500_000_000, true), Some(15.0));
     }
 }

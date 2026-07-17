@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--platform", required=True)
     parser.add_argument("--api-version", default="v1.2.0")
-    parser.add_argument("--extension-version", default="v0.3.0")
+    parser.add_argument("--extension-version", default="v0.4.0")
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.library, args.output)

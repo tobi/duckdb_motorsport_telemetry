@@ -62,6 +62,7 @@ SELECT CASE WHEN (SELECT sample_count FROM telemetry_metadata('$fixture') WHERE 
 SELECT CASE WHEN (SELECT DISTINCT format FROM telemetry_metadata('$fixture')) = 'pds' THEN true ELSE error('format detection failed') END;
 SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$fixture', channel='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('chunk order was not preserved') END;
 SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_telemetry('$fixture', rate=1, channels='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('wide scan failed') END;
+SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_telemetry('$fixture', rate=1)) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('all-channels default failed') END;
 SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_telemetry('$fixture', rate=2, channels='Speed', end_ns=3000000000)) = [10.0, 10.5, 11.0, 11.5, 12.0, 12.5] THEN true ELSE error('mixed-rate interpolation failed') END;
 SELECT CASE WHEN (SELECT filename FROM read_telemetry('$fixture', channels='Speed', filename=true) LIMIT 1) = '$fixture' THEN true ELSE error('filename option failed') END;
 SELECT CASE WHEN (SELECT filename FROM read_telemetry('$fixture', channels='Speed', add_filename_as_column=true) LIMIT 1) = '$fixture' THEN true ELSE error('filename alias failed') END;
@@ -71,9 +72,11 @@ SELECT CASE WHEN (SELECT list(DISTINCT format ORDER BY format) FROM telemetry_me
 SELECT CASE WHEN (SELECT count(*) FROM read_cosworth('$fixture', channels='Speed', rate=1)) = 4 THEN true ELSE error('read_cosworth failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_motec('$motec_fixture', channels='Speed', rate=2)) = 4 THEN true ELSE error('read_motec failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_vbo('$vbo_fixture', channels='velocity kmh', rate=2)) = 4 THEN true ELSE error('read_vbo failed') END;
-SELECT CASE WHEN (SELECT typeof(create_date) FROM read_telemetry('$fixture', channels='Speed', add_create_date_column=true, create_date_from=TIMESTAMP '1970-01-01', create_date_to=TIMESTAMP '2100-01-01') LIMIT 1) = 'TIMESTAMP' THEN true ELSE error('create date column failed') END;"
+SELECT CASE WHEN (SELECT typeof(create_date) FROM read_telemetry('$fixture', channels='Speed', add_create_date_as_column=true, create_date_from=TIMESTAMP '1970-01-01', create_date_to=TIMESTAMP '2100-01-01') LIMIT 1) = 'TIMESTAMP' THEN true ELSE error('create date column failed') END;
+SELECT CASE WHEN (SELECT typeof(modified_at) FROM read_telemetry('$fixture', channels='Speed', add_modified_at_as_column=true) LIMIT 1) = 'TIMESTAMP' THEN true ELSE error('modified-at column failed') END;
+SELECT CASE WHEN (SELECT [typeof(create_date), typeof(modified_at)] FROM read_telemetry('$fixture', channels='Speed', timestamps=true) LIMIT 1) = ['TIMESTAMP', 'TIMESTAMP'] THEN true ELSE error('timestamps option failed') END;"
 results="$("$DUCKDB" -unsigned -csv -noheader -c "$sql")"
-[[ "$(grep -c '^true$' <<<"$results")" = 14 ]]
+[[ "$(grep -c '^true$' <<<"$results")" = 17 ]]
 
 stats="$(python3 scripts/telemetry_stats.py "$fixture" --extension "$EXTENSION" --duckdb "$DUCKDB" --rate 2 --channels Speed)"
 grep -q '^Raw mixed-rate sample stats$' <<<"$stats"

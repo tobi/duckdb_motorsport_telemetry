@@ -8,6 +8,7 @@ import './style.css';
 type Row = Record<string, unknown>;
 type QueryResult = { columns: string[]; rows: Row[]; elapsed: number; total: number };
 type Lap = { number: number; label: string; startNs: number; endNs: number; durationNs: number; complete: boolean };
+type ExampleRun = { name: string; eyebrow: string; detail: string; size: string; license: string; url: string; source: string };
 
 const BASE = '/duckdb_motorsport_telemetry/';
 const EXT_REPO = `${location.origin}${BASE.replace(/\/$/, '')}`;
@@ -15,6 +16,18 @@ const bundles: duckdb.DuckDBBundles = {
   mvp: { mainModule: duckdbMvp, mainWorker: mvpWorker },
   eh: { mainModule: duckdbEh, mainWorker: ehWorker },
 };
+const EXAMPLES: ExampleRun[] = [
+  {
+    name: 'Lotus Evora · VIR Full', eyebrow: 'REAL CAR / MOTEC LD', detail: '199 channels · 3 lap IDs · 133 seconds', size: '4.8 MB', license: 'MIT',
+    url: 'https://raw.githubusercontent.com/Friss/i3rs/faf1f520510eee23ec48462ea6cc89f29bd3b6ec/test_data/VIR_LAP.ld',
+    source: 'https://github.com/Friss/i3rs/blob/faf1f520510eee23ec48462ea6cc89f29bd3b6ec/test_data/VIR_LAP.ld',
+  },
+  {
+    name: 'Lamborghini GT3 · Barcelona', eyebrow: 'IRACING / MOTEC LD / GPS', detail: '330 channels · 3 lap IDs · 107 seconds', size: '7.5 MB', license: 'Apache-2.0',
+    url: 'https://raw.githubusercontent.com/JBonifay/motec-file-parser/34edb90bfc0374f500817cdb7151a99f3e9a98b5/sample.ld',
+    source: 'https://github.com/JBonifay/motec-file-parser/blob/34edb90bfc0374f500817cdb7151a99f3e9a98b5/sample.ld',
+  },
+];
 
 let db: duckdb.AsyncDuckDB;
 let conn: duckdb.AsyncDuckDBConnection;
@@ -26,6 +39,8 @@ let plotChannels: string[] = [];
 let laps: Lap[] = [];
 let activeLap: Lap | null = null;
 let inspectedChannel = '';
+let mapRows: Row[] = [];
+let mapChannels: [string, string] | null = null;
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -55,6 +70,10 @@ app.innerHTML = `
         <div class="privacy">◉ Your data never leaves this machine</div>
       </label>
     </section>
+    <section class="example-runs" aria-label="Public example telemetry">
+      <div class="example-label"><span>NO FILE HANDY?</span><strong>Run public telemetry</strong><small>Fetched directly from the attributed open-source repository.</small></div>
+      ${EXAMPLES.map((example, index) => `<div class="example-run"><button data-example="${index}"><span>${example.eyebrow}</span><strong>${example.name}</strong><small>${example.detail}</small><b>LOAD ${example.size} →</b></button><a href="${example.source}" target="_blank" rel="noreferrer">SOURCE · ${example.license} ↗</a></div>`).join('')}
+    </section>
 
     <section class="workspace hidden" id="workspace">
       <div class="run-strip">
@@ -78,6 +97,11 @@ app.innerHTML = `
           <div id="findings"></div>
         </article>
       </div>
+      <article class="panel track-map-panel hidden" id="trackMapPanel">
+        <div class="panel-title"><div><span class="pulse"></span> GPS TRACK MAP <b id="mapLapLabel"></b></div><div id="mapCoords">SOURCE COORDINATES</div></div>
+        <canvas id="trackMap" height="430"></canvas>
+        <div class="axis-label">FULL SESSION · SELECTED LAP HIGHLIGHTED</div>
+      </article>
 
       <div class="section-head"><div><span>02</span><h2>Channel map</h2></div><p>Source-exact names, units, and clocks</p></div>
       <div class="panel channel-panel">
@@ -188,6 +212,80 @@ function candidateChannels(rows: Row[]): string[] {
   return picked.slice(0, 6);
 }
 
+async function loadExample(index: number, button: HTMLButtonElement) {
+  const example = EXAMPLES[index];
+  if (!example || !conn) return;
+  button.disabled = true;
+  const original = button.querySelector('b')?.textContent || '';
+  const progress = button.querySelector('b');
+  if (progress) progress.textContent = `FETCHING ${example.size}…`;
+  setRuntime(`Downloading ${example.name}`, 'loading');
+  try {
+    const response = await fetch(example.url);
+    if (!response.ok) throw new Error(`Example download failed: HTTP ${response.status}`);
+    const bytes = await response.arrayBuffer();
+    await loadFile(new File([bytes], `${example.name.replaceAll(/[^a-z0-9]+/gi, '_')}.ld`));
+  } catch (error) {
+    setRuntime('Could not load public example', 'error');
+    toast(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    button.disabled = false;
+    if (progress) progress.textContent = original;
+  }
+}
+
+function gpsChannelPair(): [string, string] | null {
+  const sampled = metadata.filter((row) => Number(row.sample_count) > 0);
+  const normalized = (value: unknown) => String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const find = (names: string[]) => sampled.find((row) => names.includes(normalized(row.name)));
+  const latitude = find(['lat', 'latitude', 'gpslat', 'gpslatitude']);
+  const longitude = find(['lon', 'long', 'longitude', 'gpslon', 'gpslongitude']);
+  return latitude && longitude ? [String(latitude.name), String(longitude.name)] : null;
+}
+
+async function loadTrackMap() {
+  mapChannels = gpsChannelPair();
+  mapRows = [];
+  if (mapChannels) {
+    mapRows = arrowRows(await conn.query(`SELECT * FROM read_telemetry(${sqlLiteral(activeFile)}, rate := 20, channels := ${sqlLiteral(mapChannels.join(','))})`));
+    mapRows = mapRows.filter((row) => {
+      const lat = Number(row[mapChannels![0]]); const lon = Number(row[mapChannels![1]]);
+      return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && (lat !== 0 || lon !== 0);
+    });
+  }
+  $('#trackMapPanel').classList.toggle('hidden', mapRows.length < 2);
+  drawTrackMap();
+}
+
+function drawTrackMap() {
+  if (!mapChannels || mapRows.length < 2 || !activeLap) return;
+  const canvas = $<HTMLCanvasElement>('#trackMap'); const rect = canvas.getBoundingClientRect(); const dpr = devicePixelRatio || 1; const height = rect.height;
+  canvas.width = Math.max(1, rect.width * dpr); canvas.height = Math.max(1, height * dpr);
+  const ctx = canvas.getContext('2d')!; ctx.scale(dpr, dpr); ctx.clearRect(0, 0, rect.width, height);
+  const latitudes = mapRows.map((row) => Number(row[mapChannels![0]]));
+  const longitudes = mapRows.map((row) => Number(row[mapChannels![1]]));
+  const meanLat = latitudes.reduce((sum, value) => sum + value, 0) / latitudes.length;
+  const cosLat = Math.cos(meanLat * Math.PI / 180);
+  const points = mapRows.map((row, index) => ({ x: longitudes[index] * cosLat, y: latitudes[index], time: Number(row.time_ns) }));
+  const xs = points.map((point) => point.x); const ys = points.map((point) => point.y);
+  const minX = Math.min(...xs); const maxX = Math.max(...xs); const minY = Math.min(...ys); const maxY = Math.max(...ys);
+  const pad = 35; const scale = Math.min((rect.width - pad * 2) / (maxX - minX || 1), (height - pad * 2) / (maxY - minY || 1));
+  const project = (point: { x: number; y: number }) => ({ x: (rect.width - (maxX - minX) * scale) / 2 + (point.x - minX) * scale, y: (height + (maxY - minY) * scale) / 2 - (point.y - minY) * scale });
+  const stroke = (subset: typeof points, color: string, width: number) => {
+    if (subset.length < 2) return; ctx.beginPath();
+    subset.forEach((point, index) => { const p = project(point); if (index) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y); });
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+  };
+  stroke(points, '#303734', 2);
+  const selected = points.filter((point) => point.time >= activeLap!.startNs && point.time < activeLap!.endNs);
+  stroke(selected, '#d8ff32', 3);
+  if (selected.length) {
+    const start = project(selected[0]); ctx.fillStyle = '#ff5c35'; ctx.beginPath(); ctx.arc(start.x, start.y, 5, 0, Math.PI * 2); ctx.fill();
+  }
+  $('#mapLapLabel').textContent = activeLap.label;
+  $('#mapCoords').textContent = `${meanLat.toFixed(4)}°, ${(longitudes.reduce((sum, value) => sum + value, 0) / longitudes.length).toFixed(4)}°`;
+}
+
 async function loadFile(file: File) {
   if (!conn) return toast('DuckDB is still starting', true);
   const extension = file.name.split('.').pop()?.toLowerCase();
@@ -206,6 +304,7 @@ async function loadFile(file: File) {
     $('#fileSize').textContent = formatBytes(file.size);
     renderChannels(metadata);
     await renderInsights();
+    await loadTrackMap();
     setPresets();
     setRuntime(`${file.name} · Ready`, 'ready');
     $('#workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -294,6 +393,7 @@ async function selectLap(lap: Lap) {
   renderLapRail();
   await loadLapTrace();
   setPresets(true);
+  drawTrackMap();
   if (inspectedChannel) await inspectChannel(inspectedChannel);
 }
 
@@ -468,6 +568,9 @@ function displayCell(value: unknown): string {
 }
 function updateLines() { $('#lineNumbers').textContent = Array.from({ length: editor.value.split('\n').length }, (_, i) => i + 1).join('\n'); }
 
+document.querySelectorAll<HTMLButtonElement>('[data-example]').forEach((button) => {
+  button.addEventListener('click', () => loadExample(Number(button.dataset.example), button));
+});
 $('#copyInstall').addEventListener('click', async () => {
   const sql = `INSTALL httpfs;\nLOAD httpfs;\nINSTALL motorsport_telemetry FROM 'https://pages.tobi.lutke.com/duckdb_motorsport_telemetry';\nLOAD motorsport_telemetry;`;
   await navigator.clipboard.writeText(sql);
@@ -492,6 +595,6 @@ const drop = $('#dropZone');
 for (const type of ['dragenter', 'dragover']) drop.addEventListener(type, (event) => { event.preventDefault(); drop.classList.add('dragging'); });
 for (const type of ['dragleave', 'drop']) drop.addEventListener(type, (event) => { event.preventDefault(); drop.classList.remove('dragging'); });
 drop.addEventListener('drop', (event) => { const file = (event as DragEvent).dataTransfer?.files[0]; if (file) loadFile(file); });
-window.addEventListener('resize', drawTrace);
+window.addEventListener('resize', () => { drawTrace(); drawTrackMap(); });
 
 init();

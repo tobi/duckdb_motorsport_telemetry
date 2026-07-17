@@ -62,7 +62,7 @@ Available readers:
 Always put physical selections in named arguments:
 
 - `channel` for exact long-form scans
-- `channels` for wide scans
+- `channels` for physically restricted wide scans; omit it to expose every sampled channel
 - `start_ns`, `end_ns` for session time
 - `create_date_from`, `create_date_to` for archive file dates
 
@@ -74,7 +74,7 @@ FROM read_cosworth(
   '**/Offloaded/*.pds',
   channels := 'Speed_Ref',
   filename := true,
-  add_create_date_column := true,
+  timestamps := true,
   create_date_from := TIMESTAMP '2026-07-01',
   create_date_to := TIMESTAMP '2026-08-01')
 GROUP BY filename;
@@ -82,9 +82,10 @@ GROUP BY filename;
 
 ## Interpolation
 
-- Default: `interpolate := 'linear'`
-- Continuous float channels interpolate linearly.
-- Gear, lap counters/beacons, switches, flags, status, state, alarms, and integer channels step/forward-fill.
+- Default: `interpolate := 'linear'`.
+- Only floating-point source channels can interpolate linearly.
+- Every integer source channel always uses previous-value semantics.
+- Float-backed gear, lap counters/beacons, switches, flags, status, state, and alarms also remain stepwise.
 - Use `interpolate := 'previous'` to force step interpolation for all channels.
 - Keep integer nanoseconds as the canonical clock.
 

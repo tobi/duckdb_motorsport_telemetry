@@ -55,7 +55,9 @@ The lab runs this same Rust extension as a DuckDB-Wasm side module and automatic
 - exact min/mean/max statistics and lap detection
 - a per-lap quick trace that defaults to the best complete lap
 - interactive scrubbing with interpolated values for every plotted channel
+- GPS track rendering with the selected lap highlighted when coordinates are present
 - click-through channel inspection with exact samples from the selected lap
+- two attributed public MoTeC example runs that load directly from their source repositories
 - a full SQL workbench plus ten adaptive query recipes
 
 The browser smoke test generates synthetic PDS, MoTeC, and VBO files at runtime, drops each into Chromium, verifies parsing, and executes SQL. No real telemetry fixture is committed.
@@ -189,31 +191,33 @@ FROM read_telemetry(
 Named arguments:
 
 - `rate := 100` — output frequency, 1–5,000 Hz
-- `channels := 'A,B,C'` — schema and physical channel selection
+- `channels := 'A,B,C'` — optional schema and physical channel selection; omit it to expose every sampled channel
 - `interpolate := 'linear'` or `'previous'`
 - `start_ns`, `end_ns` — physical time-range pruning
 - `filename := true` — add a `filename` column
 - `add_filename_as_column := true` — explicit alias for `filename`
-- `add_create_date_column := true` — add filesystem creation timestamp (modified-time fallback)
+- `timestamps := true` — add both `create_date` and `modified_at`
+- `add_create_date_as_column := true` — add filesystem creation time, with modified time as its fallback
+- `add_modified_at_as_column := true` — add filesystem modification time
 - `create_date_from := TIMESTAMP '2026-07-01'` — inclusive pre-open file pruning
 - `create_date_to := TIMESTAMP '2026-08-01'` — exclusive pre-open file pruning
 
-Continuous floating-point channels use linear interpolation by default, including contiguous chunk boundaries. Integer and known discrete/event channels—gear, lap number/beacon, switches, status, state, flags, alarms, GPS solution type—use previous-value semantics.
+Only floating-point source channels can be linearly interpolated. Every integer source channel always uses previous-value semantics, even when `interpolate := 'linear'`; known float-backed discrete/event channels—gear, lap number/beacon, switches, status, state, flags, alarms, GPS solution type—also remain stepwise. Use `interpolate := 'previous'` to make floating-point channels stepwise too.
 
 Across multiple files, schemas union by case-insensitive channel name. Missing channels are `NULL`.
 
 Creation-date pruning happens before telemetry files are opened:
 
 ```sql
-SELECT filename, create_date, max("Speed_Ref")
+SELECT filename, create_date, modified_at, max("Speed_Ref")
 FROM read_cosworth(
     'archive/**/*.pds',
     channels := 'Speed_Ref',
     filename := true,
-    add_create_date_column := true,
+    timestamps := true,
     create_date_from := TIMESTAMP '2026-07-01',
     create_date_to := TIMESTAMP '2026-08-01')
-GROUP BY filename, create_date;
+GROUP BY filename, create_date, modified_at;
 ```
 
 A plain `WHERE create_date ...` remains logically correct but is applied after scanning because DuckDB 1.4's public C table-function API does not expose arbitrary filter expressions to extensions. Use `create_date_from`/`create_date_to` when physical pushdown matters.
@@ -314,7 +318,7 @@ The HTTPS `INSTALL ... FROM` command above is recommended. For manual or offline
 ### Linux x86-64
 
 ```sh
-curl -LO https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.3.0/motorsport_telemetry-linux_amd64.zip
+curl -LO https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.4.0/motorsport_telemetry-linux_amd64.zip
 unzip motorsport_telemetry-linux_amd64.zip
 duckdb -unsigned
 ```
@@ -328,7 +332,7 @@ LOAD motorsport_telemetry;
 
 ```powershell
 Invoke-WebRequest `
-  https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.3.0/motorsport_telemetry-windows_amd64.zip `
+  https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.4.0/motorsport_telemetry-windows_amd64.zip `
   -OutFile motorsport_telemetry-windows_amd64.zip
 Expand-Archive motorsport_telemetry-windows_amd64.zip
 .\duckdb.exe -unsigned
