@@ -1,5 +1,7 @@
 # DuckDB Motorsport Telemetry
 
+**[Open the browser telemetry lab →](https://pages.tobi.lutke.com/duckdb_motorsport_telemetry/)**
+
 A fast, vectorized DuckDB extension and reusable Rust parser workspace for:
 
 - Pi Research / Cosworth **PDS** (`.pds`)
