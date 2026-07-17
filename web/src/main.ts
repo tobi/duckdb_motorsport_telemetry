@@ -18,11 +18,6 @@ const bundles: duckdb.DuckDBBundles = {
 };
 const EXAMPLES: ExampleRun[] = [
   {
-    name: 'Lotus Evora · VIR Full', eyebrow: 'REAL CAR / MOTEC LD', detail: '199 channels · 3 lap IDs · 133 seconds', size: '4.8 MB', license: 'MIT',
-    url: 'https://raw.githubusercontent.com/Friss/i3rs/faf1f520510eee23ec48462ea6cc89f29bd3b6ec/test_data/VIR_LAP.ld',
-    source: 'https://github.com/Friss/i3rs/blob/faf1f520510eee23ec48462ea6cc89f29bd3b6ec/test_data/VIR_LAP.ld',
-  },
-  {
     name: 'Lamborghini GT3 · Barcelona', eyebrow: 'IRACING / MOTEC LD / GPS', detail: '330 channels · 3 lap IDs · 107 seconds', size: '7.5 MB', license: 'Apache-2.0',
     url: 'https://raw.githubusercontent.com/JBonifay/motec-file-parser/34edb90bfc0374f500817cdb7151a99f3e9a98b5/sample.ld',
     source: 'https://github.com/JBonifay/motec-file-parser/blob/34edb90bfc0374f500817cdb7151a99f3e9a98b5/sample.ld',
@@ -72,7 +67,7 @@ app.innerHTML = `
         </label>
         <div class="demo-launch" aria-label="Public example telemetry">
           <div class="demo-heading"><span>NO FILE? LOAD A REAL DEMO</span><small>Open telemetry · fetched from source</small></div>
-          ${EXAMPLES.map((example, index) => `<div class="demo-run"><button data-example="${index}"><span>${index ? 'BARCELONA + GPS' : 'VIR FULL'}</span><b>${example.size} →</b></button><a href="${example.source}" target="_blank" rel="noreferrer" title="${example.name} · ${example.license}">SOURCE</a></div>`).join('')}
+          ${EXAMPLES.map((example, index) => `<div class="demo-run"><button data-example="${index}"><span>LOAD LAMBORGHINI GT3 · BARCELONA + GPS</span><b>RUN DEMO · ${example.size} →</b></button><a href="${example.source}" target="_blank" rel="noreferrer" title="${example.name} · ${example.license}">SOURCE · ${example.license}</a></div>`).join('')}
         </div>
       </div>
     </section>
@@ -198,20 +193,18 @@ async function init() {
 
 function candidateChannels(rows: Row[]): string[] {
   const sampled = rows.filter((row) => Number(row.sample_count) > 0);
-  const groups = [
-    /(^|[^a-z])(speed|velocity|vcar)([^a-z]|$)/i,
-    /(brake|p_f_brake)/i,
-    /(throttle|pedal)/i,
-    /(accel.*lat|lat.*accel|glat|g force lat)/i,
-    /(accel.*long|long.*accel|glong|g force long)/i,
-    /(^|[^a-z])gear([^a-z]|$)/i,
+  const normalized = (value: unknown) => String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const pick = (exact: string[], fallback: RegExp, exclude?: RegExp) => exact.map((wanted) => sampled.find((row) => normalized(row.name) === wanted)).find(Boolean)
+    || sampled.find((row) => fallback.test(String(row.name)) && !exclude?.test(String(row.name)));
+  const matches = [
+    pick(['groundspeed', 'speedref', 'corrspeed', 'vehiclespeed', 'gpsspeed', 'speed', 'velocitykmh'], /speed|velocity/i, /engine|wheel|target|limit/i),
+    pick(['throttlepos', 'driverthrottlepos', 'throttlepedal', 'throttle'], /throttle/i),
+    pick(['brakepedalpos', 'driverbrakepressure', 'brakepressure', 'brake'], /brake|p_f_brake/i),
+    pick(['gforcelat', 'lateralacceleration', 'glat'], /accel.*lat|lat.*accel|glat|g force lat/i),
+    pick(['gforcelong', 'longitudinalacceleration', 'glong'], /accel.*long|long.*accel|glong|g force long/i),
+    pick(['gear'], /(^|[^a-z])gear([^a-z]|$)/i),
   ];
-  const picked: string[] = [];
-  for (const pattern of groups) {
-    const match = sampled.find((row) => pattern.test(String(row.name)) && !picked.includes(String(row.name)));
-    if (match) picked.push(String(match.name));
-  }
-  return picked.slice(0, 6);
+  return matches.filter((row): row is Row => Boolean(row)).map((row) => String(row.name)).filter((name, index, names) => names.indexOf(name) === index).slice(0, 6);
 }
 
 async function loadExample(index: number, button: HTMLButtonElement) {
@@ -519,10 +512,10 @@ function setPresets(preserveEditor = false) {
   const sampled = metadata.filter((row) => Number(row.sample_count) > 0);
   const find = (pattern: RegExp, exclude?: RegExp) => String(sampled.find((row) => pattern.test(String(row.name)) && !exclude?.test(String(row.name)))?.name || '');
   const normalized = (value: unknown) => String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
-  const findExact = (names: string[]) => String(sampled.find((row) => names.includes(normalized(row.name)))?.name || '');
-  const speed = findExact(['speedref', 'corrspeed', 'vehiclespeed', 'gpsspeed', 'groundspeed', 'speed', 'velocitykmh']) || find(/speed|velocity/i, /engine|wheel|target|limit/i) || first;
-  const throttle = find(/throttle|pedal/i);
-  const brake = find(/brake/i);
+  const findExact = (names: string[]) => String(names.map((wanted) => sampled.find((row) => normalized(row.name) === wanted)).find(Boolean)?.name || '');
+  const speed = findExact(['groundspeed', 'speedref', 'corrspeed', 'vehiclespeed', 'gpsspeed', 'speed', 'velocitykmh']) || find(/speed|velocity/i, /engine|wheel|target|limit/i) || first;
+  const throttle = findExact(['throttlepos', 'driverthrottlepos', 'throttlepedal', 'throttle']) || find(/throttle/i);
+  const brake = findExact(['brakepedalpos', 'driverbrakepressure', 'brakepressure', 'brake']) || find(/brake/i);
   const gear = find(/(^|[^a-z])gear([^a-z]|$)/i);
   const gLat = find(/g.?force.?lat|lateral.?accel|accel.*lat|glat/i);
   const gLong = find(/g.?force.?(long|lon)|longitudinal.?accel|accel.*(long|lon)|glong/i);
