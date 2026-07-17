@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      extension_version:
+        description: Extension metadata version used for a Pages-only refresh
+        required: true
+        default: v0.4.0
 
 permissions:
   contents: write
@@ -38,7 +43,7 @@ jobs:
             --library '${{ matrix.library }}' \
             --output 'dist/${{ matrix.platform }}/motorsport_telemetry.duckdb_extension' \
             --platform '${{ matrix.platform }}' \
-            --extension-version '${{ github.ref_name }}'
+            --extension-version '${{ inputs.extension_version || github.ref_name }}'
           python - <<'PY'
           from zipfile import ZIP_DEFLATED, ZipFile
           platform = '${{ matrix.platform }}'
@@ -68,6 +73,8 @@ jobs:
         with:
           workspaces: wasm-extension
       - name: Build DuckDB-Wasm extension
+        env:
+          EXTENSION_VERSION: ${{ inputs.extension_version || github.ref_name }}
         run: |
           scripts/build_wasm_extension.sh
           python - <<'PY'
