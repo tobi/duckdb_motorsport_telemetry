@@ -57,7 +57,7 @@ The lab runs this same Rust extension as a DuckDB-Wasm side module and automatic
 - interactive scrubbing with interpolated values for every plotted channel
 - GPS track rendering with the selected lap highlighted when coordinates are present
 - click-through channel inspection with exact samples from the selected lap
-- an attributed Lamborghini GT3 Barcelona MoTeC demo that loads directly from its source repository
+- an attributed Lamborghini GT3 Barcelona MoTeC demo that automatically loads from its source repository
 - a full SQL workbench plus ten adaptive query recipes, including session top speed, highest directional G, and peak combined G
 
 The browser smoke test generates synthetic PDS, MoTeC, and VBO files at runtime, drops each into Chromium, verifies parsing, and executes SQL. No real telemetry fixture is committed.

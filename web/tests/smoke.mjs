@@ -23,7 +23,9 @@ const executablePath = process.env.CHROME || (process.platform === 'linux' ? '/u
 const browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox'] });
 const page = await browser.newPage(); const errors = [];
 page.on('pageerror', error => errors.push(error.message));
-await page.goto(process.env.TEST_URL || 'http://127.0.0.1:4173/duckdb_motorsport_telemetry/');
+const testUrl = new URL(process.env.TEST_URL || 'http://127.0.0.1:4173/duckdb_motorsport_telemetry/');
+testUrl.searchParams.set('no-demo', '1');
+await page.goto(testUrl.href);
 await page.waitForFunction(() => document.querySelector('#runtimeText')?.textContent?.includes('Extension ready'), null, { timeout: 60_000 });
 
 const pds = '/tmp/telemetry-browser-smoke.pds'; pdsFixture(pds);
@@ -38,7 +40,7 @@ const vbo = '/tmp/telemetry-browser-smoke.vbo';
 writeFileSync(vbo, `[header]\ntime\nvelocity kmh\nthrottle\nlap\nlatitude\nlongitude\n[column names]\ntime velocity throttle lap latitude longitude\n[data]\n120000.0 10 0 0 41.0000 2.0000\n120010.0 20 10 0 41.0010 2.0010\n120020.0 30 20 1 41.0020 2.0020\n120030.0 40 30 1 41.0030 2.0020\n120040.0 50 40 1 41.0040 2.0010\n120050.0 60 50 1 41.0040 2.0000\n120100.0 70 60 2 41.0030 1.9990\n120110.0 80 70 2 41.0020 1.9980\n120120.0 90 80 2 41.0010 1.9980\n120130.0 60 70 3 41.0000 1.9990\n120140.0 40 40 3 40.9995 2.0000\n120150.0 20 10 3 41.0000 2.0000\n`);
 await page.locator('#fileInput').setInputFiles(vbo);
 await page.waitForFunction(() => document.querySelector('#fileFormat')?.textContent === 'VBO' && document.querySelectorAll('#channelRows tr').length === 6, null, { timeout: 30_000 });
-await page.waitForFunction(() => document.querySelectorAll('#lapRail button').length === 4 && document.querySelector('#lapRail button.active')?.textContent?.includes('BEST') && document.querySelectorAll('#recipeGrid button').length === 10 && document.querySelector('#recipeGrid button')?.textContent?.includes('Top speed in session') && !document.querySelector('#trackMapPanel')?.classList.contains('hidden') && document.querySelectorAll('[data-example]').length === 1 && document.querySelector('.demo-heading')?.textContent?.includes('LOAD A REAL DEMO'), null, { timeout: 30_000 });
+await page.waitForFunction(() => document.querySelectorAll('#lapRail button').length === 4 && document.querySelector('#lapRail button.active')?.textContent?.includes('BEST') && document.querySelectorAll('#recipeGrid button').length === 10 && document.querySelector('#recipeGrid button')?.textContent?.includes('Top speed in session') && !document.querySelector('#trackMapPanel')?.classList.contains('hidden') && document.querySelectorAll('[data-example]').length === 1 && document.querySelector('.demo-heading')?.textContent?.includes('AUTO-LOADING REAL DEMO'), null, { timeout: 30_000 });
 await page.locator('#trace').hover({ position: { x: 300, y: 100 } });
 await page.waitForFunction(() => !document.querySelector('#scrubber')?.classList.contains('hidden'));
 await page.locator('#channelRows tr[data-channel="velocity kmh"]').click();

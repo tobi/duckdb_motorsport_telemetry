@@ -66,7 +66,7 @@ app.innerHTML = `
           <div class="privacy">◉ Your data never leaves this machine</div>
         </label>
         <div class="demo-launch" aria-label="Public example telemetry">
-          <div class="demo-heading"><span>NO FILE? LOAD A REAL DEMO</span><small>Open telemetry · fetched from source</small></div>
+          <div class="demo-heading"><span>AUTO-LOADING REAL DEMO</span><small>Lamborghini GT3 · replace it with your file anytime</small></div>
           ${EXAMPLES.map((example, index) => `<div class="demo-run"><button data-example="${index}"><span>LOAD LAMBORGHINI GT3 · BARCELONA + GPS</span><b>RUN DEMO · ${example.size} →</b></button><a href="${example.source}" target="_blank" rel="noreferrer" title="${example.name} · ${example.license}">SOURCE · ${example.license}</a></div>`).join('')}
         </div>
       </div>
@@ -185,6 +185,10 @@ async function init() {
     await conn.query('LOAD motorsport_telemetry');
     const version = arrowRows(await conn.query('SELECT version() AS version'))[0]?.version;
     setRuntime(`DuckDB ${version} · Extension ready`, 'ready');
+    if (!new URLSearchParams(location.search).has('no-demo')) {
+      const demoButton = document.querySelector<HTMLButtonElement>('[data-example="0"]');
+      if (demoButton) await loadExample(0, demoButton);
+    }
   } catch (error) {
     console.error(error); setRuntime('Runtime failed to start', 'error');
     toast(error instanceof Error ? error.message : String(error), true);
