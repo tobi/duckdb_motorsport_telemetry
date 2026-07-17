@@ -38,7 +38,7 @@ const vbo = '/tmp/telemetry-browser-smoke.vbo';
 writeFileSync(vbo, `[header]\ntime\nvelocity kmh\nthrottle\nlap\nlatitude\nlongitude\n[column names]\ntime velocity throttle lap latitude longitude\n[data]\n120000.0 10 0 0 41.0000 2.0000\n120010.0 20 10 0 41.0010 2.0010\n120020.0 30 20 1 41.0020 2.0020\n120030.0 40 30 1 41.0030 2.0020\n120040.0 50 40 1 41.0040 2.0010\n120050.0 60 50 1 41.0040 2.0000\n120100.0 70 60 2 41.0030 1.9990\n120110.0 80 70 2 41.0020 1.9980\n120120.0 90 80 2 41.0010 1.9980\n120130.0 60 70 3 41.0000 1.9990\n120140.0 40 40 3 40.9995 2.0000\n120150.0 20 10 3 41.0000 2.0000\n`);
 await page.locator('#fileInput').setInputFiles(vbo);
 await page.waitForFunction(() => document.querySelector('#fileFormat')?.textContent === 'VBO' && document.querySelectorAll('#channelRows tr').length === 6, null, { timeout: 30_000 });
-await page.waitForFunction(() => document.querySelectorAll('#lapRail button').length === 4 && document.querySelector('#lapRail button.active')?.textContent?.includes('BEST') && document.querySelectorAll('#recipeGrid button').length === 10 && !document.querySelector('#trackMapPanel')?.classList.contains('hidden') && document.querySelectorAll('[data-example]').length === 2, null, { timeout: 30_000 });
+await page.waitForFunction(() => document.querySelectorAll('#lapRail button').length === 4 && document.querySelector('#lapRail button.active')?.textContent?.includes('BEST') && document.querySelectorAll('#recipeGrid button').length === 10 && document.querySelector('#recipeGrid button')?.textContent?.includes('Top speed in session') && !document.querySelector('#trackMapPanel')?.classList.contains('hidden') && document.querySelectorAll('[data-example]').length === 2 && document.querySelector('.demo-heading')?.textContent?.includes('LOAD A REAL DEMO'), null, { timeout: 30_000 });
 await page.locator('#trace').hover({ position: { x: 300, y: 100 } });
 await page.waitForFunction(() => !document.querySelector('#scrubber')?.classList.contains('hidden'));
 await page.locator('#channelRows tr[data-channel="velocity kmh"]').click();
@@ -46,6 +46,9 @@ await page.waitForFunction(() => document.querySelectorAll('#sampleList > div').
 await page.click('#closeInspector');
 await page.click('#runQuery');
 await page.waitForFunction(() => document.querySelector('#queryTiming')?.textContent?.includes('6 ROWS'), null, { timeout: 30_000 });
+await page.locator('[data-recipe="0"]').click();
+await page.click('#runQuery');
+await page.waitForFunction(() => document.querySelector('#queryTiming')?.textContent?.includes('1 ROWS') && document.querySelector('#queryResult')?.textContent?.includes('top_speed'), null, { timeout: 30_000 });
 if (errors.length) throw new Error(errors.join('\n'));
 console.log('DuckDB-Wasm extension parsed synthetic PDS, MoTeC, and VBO files and ran browser SQL');
 await browser.close();

@@ -62,17 +62,19 @@ app.innerHTML = `
         <p>Cosworth PDS, MoTeC LD, and VBOX VBO—parsed by Rust and queried by DuckDB, entirely inside your browser.</p>
         <div class="formats"><span>.PDS</span><span>.LD</span><span>.VBO</span></div>
       </div>
-      <label class="drop-card" for="fileInput">
-        <input id="fileInput" type="file" accept=".pds,.ld,.vbo" />
-        <div class="drop-rings"><div class="upload-icon">↥</div></div>
-        <strong>DROP A RUN HERE</strong>
-        <small>or click to choose a file</small>
-        <div class="privacy">◉ Your data never leaves this machine</div>
-      </label>
-    </section>
-    <section class="example-runs" aria-label="Public example telemetry">
-      <div class="example-label"><span>NO FILE HANDY?</span><strong>Run public telemetry</strong><small>Fetched directly from the attributed open-source repository.</small></div>
-      ${EXAMPLES.map((example, index) => `<div class="example-run"><button data-example="${index}"><span>${example.eyebrow}</span><strong>${example.name}</strong><small>${example.detail}</small><b>LOAD ${example.size} →</b></button><a href="${example.source}" target="_blank" rel="noreferrer">SOURCE · ${example.license} ↗</a></div>`).join('')}
+      <div class="drop-stack">
+        <label class="drop-card" for="fileInput">
+          <input id="fileInput" type="file" accept=".pds,.ld,.vbo" />
+          <div class="drop-rings"><div class="upload-icon">↥</div></div>
+          <strong>DROP A RUN HERE</strong>
+          <small>or click to choose a file</small>
+          <div class="privacy">◉ Your data never leaves this machine</div>
+        </label>
+        <div class="demo-launch" aria-label="Public example telemetry">
+          <div class="demo-heading"><span>NO FILE? LOAD A REAL DEMO</span><small>Open telemetry · fetched from source</small></div>
+          ${EXAMPLES.map((example, index) => `<div class="demo-run"><button data-example="${index}"><span>${index ? 'BARCELONA + GPS' : 'VIR FULL'}</span><b>${example.size} →</b></button><a href="${example.source}" target="_blank" rel="noreferrer" title="${example.name} · ${example.license}">SOURCE</a></div>`).join('')}
+        </div>
+      </div>
     </section>
 
     <section class="workspace hidden" id="workspace">
@@ -514,28 +516,33 @@ function setPresets(preserveEditor = false) {
   const first = candidates[0] || String(metadata.find((r) => Number(r.sample_count))?.name || '');
   const lap = activeLap || { startNs: 0, endNs: 10_000_000_000, label: 'SESSION' };
   const start = Math.round(lap.startNs); const end = Math.round(lap.endNs);
-  const find = (pattern: RegExp) => String(metadata.find((row) => Number(row.sample_count) > 0 && pattern.test(String(row.name)))?.name || '');
-  const speed = find(/speed|velocity/i) || first;
+  const sampled = metadata.filter((row) => Number(row.sample_count) > 0);
+  const find = (pattern: RegExp, exclude?: RegExp) => String(sampled.find((row) => pattern.test(String(row.name)) && !exclude?.test(String(row.name)))?.name || '');
+  const normalized = (value: unknown) => String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const findExact = (names: string[]) => String(sampled.find((row) => names.includes(normalized(row.name)))?.name || '');
+  const speed = findExact(['speedref', 'corrspeed', 'vehiclespeed', 'gpsspeed', 'groundspeed', 'speed', 'velocitykmh']) || find(/speed|velocity/i, /engine|wheel|target|limit/i) || first;
   const throttle = find(/throttle|pedal/i);
   const brake = find(/brake/i);
   const gear = find(/(^|[^a-z])gear([^a-z]|$)/i);
-  const accel = find(/accel.*(long|lat)|g.?force|glong|glat/i) || first;
+  const gLat = find(/g.?force.?lat|lateral.?accel|accel.*lat|glat/i);
+  const gLong = find(/g.?force.?(long|lon)|longitudinal.?accel|accel.*(long|lon)|glong/i);
+  const gChannels = [...new Set([gLat, gLong].filter(Boolean))];
   const presets: Record<string, string> = {
     metadata: `SELECT name, unit, frequency_hz, sample_count\nFROM telemetry_metadata(${sqlLiteral(activeFile)})\nWHERE sample_count > 0\nORDER BY name;`,
     stats: `SELECT channel, any_value(unit) AS unit,\n       count(*) AS samples, min(value), avg(value), max(value)\nFROM telemetry_samples(${sqlLiteral(activeFile)},\n     channel := ${sqlLiteral(candidates.join(','))},\n     start_ns := ${start}, end_ns := ${end})\nGROUP BY channel\nORDER BY channel;`,
     samples: `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, value\nFROM telemetry_samples(${sqlLiteral(activeFile)},\n     channel := ${sqlLiteral(first)},\n     start_ns := ${start}, end_ns := ${end})\nORDER BY time_ns\nLIMIT 500;`,
   };
   const recipes = [
+    ['Top speed in session', speed, `SELECT max(value) AS top_speed, any_value(unit) AS unit,\n       arg_max(time_ns, value) / 1e9 AS session_seconds\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(speed)});`],
+    ['Highest G in session', gChannels.length ? gChannels.join(' + ') : 'No G channel detected', gChannels.length ? `SELECT arg_max(channel, abs(value)) AS channel,\n       arg_max(value, abs(value)) AS signed_g,\n       max(abs(value)) AS peak_absolute_g,\n       arg_max(time_ns, abs(value)) / 1e9 AS session_seconds\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(gChannels.join(','))});` : `SELECT 'No lateral or longitudinal G channel was detected' AS message;`],
+    ['Peak combined G', gLat && gLong ? `${gLat} + ${gLong}` : 'Requires lateral and longitudinal G', gLat && gLong ? `WITH g AS (\n  SELECT time_ns, sqrt(pow(${quoteIdent(gLat)}, 2) + pow(${quoteIdent(gLong)}, 2)) AS combined_g\n  FROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n       channels := ${sqlLiteral(`${gLat},${gLong}`)})\n)\nSELECT max(combined_g) AS peak_combined_g,\n       arg_max(time_ns, combined_g) / 1e9 AS session_seconds\nFROM g;` : `SELECT 'Both lateral and longitudinal G channels are required' AS message;`],
     ['Native rate audit', 'Compare logger clocks and volume', `SELECT frequency_hz, count(*) AS channels, sum(sample_count) AS samples\nFROM telemetry_metadata(${sqlLiteral(activeFile)})\nWHERE sample_count > 0\nGROUP BY frequency_hz ORDER BY frequency_hz DESC;`],
     ['Current lap · wide', '100 Hz interpolated channel set', `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, * EXCLUDE (time_ns)\nFROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n     channels := ${sqlLiteral(candidates.join(','))},\n     start_ns := ${start}, end_ns := ${end})\nLIMIT 1000;`],
-    ['Percentile envelope', `Distribution of ${speed}`, `SELECT quantile_cont(value, [0, .01, .1, .5, .9, .99, 1]) AS percentiles\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(speed)},\n     start_ns := ${start}, end_ns := ${end});`],
-    ['Peak events', `Largest absolute ${accel} values`, `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, value\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(accel)},\n     start_ns := ${start}, end_ns := ${end})\nORDER BY abs(value) DESC LIMIT 20;`],
-    ['Fastest zones', `Top ${speed} samples`, `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, value\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(speed)},\n     start_ns := ${start}, end_ns := ${end})\nORDER BY value DESC LIMIT 25;`],
+    ['Percentile envelope', `Distribution of ${speed}`, `SELECT quantile_cont(value, [0, .01, .1, .5, .9, .99, 1]) AS percentiles\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(speed)});`],
     ['Channel coverage', 'Definitions with no physical samples', `SELECT name, unit, frequency_hz\nFROM telemetry_metadata(${sqlLiteral(activeFile)})\nWHERE sample_count = 0 ORDER BY name;`],
     ['Gear usage', gear ? `Time distribution for ${gear}` : 'Adapt after selecting a gear channel', gear ? `SELECT ${quoteIdent(gear)} AS gear, count(*) / 100.0 AS seconds\nFROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100, channels := ${sqlLiteral(gear)},\n     start_ns := ${start}, end_ns := ${end})\nGROUP BY 1 ORDER BY 1;` : presets.samples],
     ['Pedal overlap', brake && throttle ? `${brake} × ${throttle}` : 'Adapt after selecting pedal channels', brake && throttle ? `SELECT count(*) / 100.0 AS overlap_seconds\nFROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n     channels := ${sqlLiteral(`${brake},${throttle}`)}, start_ns := ${start}, end_ns := ${end})\nWHERE ${quoteIdent(brake)} > 0 AND ${quoteIdent(throttle)} > 0;` : presets.stats],
     ['Discrete transitions', `Changes in ${gear || first}`, `WITH s AS (\n  SELECT time_ns, value, lag(value) OVER (ORDER BY time_ns) AS previous\n  FROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(gear || first)},\n       start_ns := ${start}, end_ns := ${end})\n) SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, previous, value\nFROM s WHERE value IS DISTINCT FROM previous ORDER BY time_ns;`],
-    ['Correlation', 'Relationship between selected signals', candidates.length > 1 ? `SELECT corr(${quoteIdent(candidates[0])}, ${quoteIdent(candidates[1])}) AS correlation\nFROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n     channels := ${sqlLiteral(candidates.slice(0, 2).join(','))}, start_ns := ${start}, end_ns := ${end});` : presets.stats],
   ];
   if (!preserveEditor) editor.value = presets.metadata;
   updateLines();
