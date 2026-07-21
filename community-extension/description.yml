@@ -1,7 +1,7 @@
 extension:
   name: motorsport_telemetry
   description: Query Cosworth PDS, MoTeC LD, and Racelogic VBOX telemetry directly in DuckDB
-  version: 0.4.0
+  version: 0.5.0
   language: Rust
   build: cargo
   license: MIT
