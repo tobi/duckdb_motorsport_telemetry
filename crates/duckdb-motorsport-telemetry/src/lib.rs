@@ -7,6 +7,7 @@ use duckdb::{
 };
 use duckdb_loadable_macros::duckdb_entrypoint_c_api;
 use glob::glob;
+#[cfg(target_os = "emscripten")]
 use libduckdb_sys as ffi;
 use motec_telemetry::MotecFile;
 use motorsport_telemetry_core::SourceRef;
@@ -29,13 +30,6 @@ const CHANNELS_COLUMN_COUNT: u64 = 12;
 trait FlatVectorExt {
     fn typed_slice<T>(&mut self) -> &mut [T];
 }
-#[cfg(not(target_os = "emscripten"))]
-impl FlatVectorExt for FlatVector {
-    fn typed_slice<T>(&mut self) -> &mut [T] {
-        self.as_mut_slice::<T>()
-    }
-}
-#[cfg(target_os = "emscripten")]
 impl FlatVectorExt for FlatVector<'_> {
     fn typed_slice<T>(&mut self) -> &mut [T] {
         unsafe { self.as_mut_slice::<T>() }

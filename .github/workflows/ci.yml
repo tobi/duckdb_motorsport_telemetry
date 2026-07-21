@@ -54,10 +54,23 @@ jobs:
           sleep 2
           CHROME=/usr/bin/google-chrome node tests/smoke.mjs
 
+  community-extension-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build with DuckDB Community Extension tooling
+        run: make DUCKDB_PLATFORM=linux_amd64 TARGET_DUCKDB_VERSION=v1.5.4 release
+
   duckdb-integration:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install DuckDB CLI

@@ -52,13 +52,15 @@ The lab runs this same Rust extension as a DuckDB-Wasm side module and automatic
 - recorded versus empty channel definitions
 - exact native rates, sample counts, units, and duration
 - likely speed, brake, throttle, acceleration, and gear signals
-- exact min/mean/max statistics and lap detection
+- unit-normalized top speed, directional G, combined G, and best-lap headlines
+- lap detection from counters, timer/distance resets, and VBOX start-line crossings
 - a per-lap quick trace that defaults to the best complete lap
-- interactive scrubbing with interpolated values for every plotted channel
-- GPS track rendering with the selected lap highlighted when coordinates are present
+- distance-based solid/dashed lap overlays with scrubbed time delta
+- synchronized trace and GPS-map scrubbing with speed, throttle, and brake at the cursor
 - click-through channel inspection with exact samples from the selected lap
-- an attributed Lamborghini GT3 Barcelona MoTeC demo that automatically loads from its source repository
-- a full SQL workbench plus ten adaptive query recipes, including session top speed, highest directional G, and peak combined G
+- persistent speed, pedal, G, and distance role overrides for unusual logger naming
+- a checksum-verified, browser-cached Lamborghini GT3 Barcelona demo
+- a full SQL workbench plus ten adaptive query recipes
 
 The browser smoke test generates synthetic PDS, MoTeC, and VBO files at runtime, drops each into Chromium, verifies parsing, and executes SQL. No real telemetry fixture is committed.
 
@@ -358,19 +360,21 @@ con.execute("LOAD motorsport_telemetry")
 print(con.sql("SELECT * FROM telemetry_metadata('run.vbo')"))
 ```
 
-A future DuckDB Community Extension submission will enable:
+The repository is now prepared for a DuckDB Community Extension submission, which will enable signed installation without `-unsigned`:
 
 ```sql
 INSTALL motorsport_telemetry FROM community;
 LOAD motorsport_telemetry;
 ```
 
+See the [submission plan](docs/community-extension-submission.md) and [upstream descriptor draft](community-extension/description.yml).
+
 ## Build from source
 
-Requirements for native builds: Rust 1.84+, Python 3, DuckDB CLI 1.4.x.
+Requirements for native builds: Rust 1.85+, Python 3, DuckDB CLI 1.4.x.
 
 ```sh
-git clone https://github.com/tobi/duckdb_motorsport_telemetry.git
+git clone --recursive https://github.com/tobi/duckdb_motorsport_telemetry.git
 cd duckdb_motorsport_telemetry
 make test
 make build

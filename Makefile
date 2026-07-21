@@ -1,32 +1,34 @@
-DUCKDB ?= duckdb
-PROFILE ?= release
-EXTENSION_VERSION ?= v0.4.0
-PLATFORM ?= $(shell $(DUCKDB) -csv -noheader -c "PRAGMA platform;")
-CARGO_FLAGS := $(if $(filter release,$(PROFILE)),--release,)
-TARGET_DIR := target/$(PROFILE)
-BUILD_DIR := build/$(PROFILE)
-SHARED_LIB := $(TARGET_DIR)/libmotorsport_telemetry.$(if $(filter Darwin,$(shell uname -s)),dylib,so)
-EXTENSION := $(BUILD_DIR)/motorsport_telemetry.duckdb_extension
+EXTENSION_NAME=motorsport_telemetry
+USE_UNSTABLE_C_API=0
+# The extension uses only the stable public C API introduced in v1.2.0.
+# Community Extensions overrides this with its current DuckDB build version.
+TARGET_DUCKDB_VERSION?=v1.2.0
+EXTENSION_VERSION?=v0.4.0
+DUCKDB?=duckdb
 
-.PHONY: all build test integration-test clean
+include extension-ci-tools/makefiles/c_api_extensions/base.Makefile
+include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 
-all: build
+.PHONY: all build configure debug release test integration-test clean
 
-build:
-	cargo build $(CARGO_FLAGS)
-	mkdir -p $(BUILD_DIR)
-	cp $(SHARED_LIB) $(EXTENSION)
-	python3 scripts/append_metadata.py $(EXTENSION) --platform $(PLATFORM) --extension-version $(EXTENSION_VERSION)
-	@echo "Built $(EXTENSION) for $(PLATFORM)"
+all: release
+build: release
+
+configure: venv platform extension_version
+
+debug: configure build_extension_library_debug build_extension_with_metadata_debug
+release: configure build_extension_library_release build_extension_with_metadata_release
+
+test_debug: debug test_extension_debug
+test_release: release test_extension_release
 
 test:
 	cargo fmt --check
-	cargo test
+	cargo test --workspace
+	cargo clippy --workspace --all-targets -- -D warnings
 	$(MAKE) integration-test
 
-integration-test: build
-	DUCKDB=$(DUCKDB) EXTENSION=$(abspath $(EXTENSION)) tests/integration.sh
+integration-test: release
+	DUCKDB=$(DUCKDB) EXTENSION=$(abspath build/release/motorsport_telemetry.duckdb_extension) tests/integration.sh
 
-clean:
-	cargo clean
-	rm -rf build
+clean: clean_build clean_rust

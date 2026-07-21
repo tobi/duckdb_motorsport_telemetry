@@ -8,7 +8,9 @@ import './style.css';
 type Row = Record<string, unknown>;
 type QueryResult = { columns: string[]; rows: Row[]; elapsed: number; total: number };
 type Lap = { number: number; label: string; startNs: number; endNs: number; durationNs: number; complete: boolean };
-type ExampleRun = { name: string; eyebrow: string; detail: string; size: string; license: string; url: string; source: string };
+type ExampleRun = { name: string; eyebrow: string; detail: string; size: string; license: string; url: string; source: string; sha256: string };
+type RoleKey = 'speed' | 'throttle' | 'brake' | 'gLat' | 'gLong' | 'distance';
+type SignalRoles = Record<RoleKey, string>;
 
 const BASE = '/duckdb_motorsport_telemetry/';
 const EXT_REPO = `${location.origin}${BASE.replace(/\/$/, '')}`;
@@ -21,6 +23,7 @@ const EXAMPLES: ExampleRun[] = [
     name: 'Lamborghini GT3 · Barcelona', eyebrow: 'IRACING / MOTEC LD / GPS', detail: '330 channels · 3 lap IDs · 107 seconds', size: '7.5 MB', license: 'Apache-2.0',
     url: 'https://raw.githubusercontent.com/JBonifay/motec-file-parser/34edb90bfc0374f500817cdb7151a99f3e9a98b5/sample.ld',
     source: 'https://github.com/JBonifay/motec-file-parser/blob/34edb90bfc0374f500817cdb7151a99f3e9a98b5/sample.ld',
+    sha256: 'f43a70743eeadf9c20ff16169942d654c920d226d5584af1b2b33c8d7e60a291',
   },
 ];
 
@@ -36,6 +39,12 @@ let activeLap: Lap | null = null;
 let inspectedChannel = '';
 let mapRows: Row[] = [];
 let mapChannels: [string, string] | null = null;
+let signalRoles: SignalRoles = { speed: '', throttle: '', brake: '', gLat: '', gLong: '', distance: '' };
+let compareLap: Lap | null = null;
+let compareRows: Row[] = [];
+let scrubTimeNs: number | null = null;
+let mapScreenPoints: { x: number; y: number; time: number }[] = [];
+let vboLapCrossings: number[] = [];
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -82,10 +91,12 @@ app.innerHTML = `
 
       <div class="section-head"><div><span>01</span><h2>Run intelligence</h2></div><p>Automatic native-rate inspection</p></div>
       <div class="metric-grid" id="metrics"></div>
+      <div class="performance-grid" id="performanceMetrics"></div>
       <div class="analysis-grid">
         <article class="panel trace-panel">
           <div class="panel-title"><div><span class="pulse"></span> QUICK TRACE <b id="traceLapLabel"></b></div><div id="traceLegend" class="legend"></div></div>
           <div class="lap-rail" id="lapRail"></div>
+          <div class="comparison-bar"><span>DISTANCE OVERLAY</span><label>COMPARE TO <select id="compareLap"></select></label><small id="comparisonStatus">SELECTED LAP SOLID · REFERENCE DASHED</small></div>
           <div class="trace-stage"><canvas id="trace" height="260"></canvas><div class="scrubber hidden" id="scrubber"><i></i><div id="scrubValues"></div></div></div>
           <div class="axis-label">SCRUB FOR INTERPOLATED VALUES · LAP TIME →</div>
         </article>
@@ -96,12 +107,13 @@ app.innerHTML = `
       </div>
       <article class="panel track-map-panel hidden" id="trackMapPanel">
         <div class="panel-title"><div><span class="pulse"></span> GPS TRACK MAP <b id="mapLapLabel"></b></div><div id="mapCoords">SOURCE COORDINATES</div></div>
-        <canvas id="trackMap" height="430"></canvas>
-        <div class="axis-label">FULL SESSION · SELECTED LAP HIGHLIGHTED</div>
+        <div class="map-stage"><canvas id="trackMap" height="430"></canvas><div class="map-tooltip hidden" id="mapTooltip"></div></div>
+        <div class="axis-label">HOVER TO SCRUB TRACE · SELECTED LAP HIGHLIGHTED</div>
       </article>
 
       <div class="section-head"><div><span>02</span><h2>Channel map</h2></div><p>Source-exact names, units, and clocks</p></div>
       <div class="panel channel-panel">
+        <div class="role-editor"><div><span>SIGNAL ROLES</span><small>Override automatic channel detection · saved for this channel layout</small></div><div class="role-selects" id="roleSelects"></div><button id="resetRoles">RESET AUTO</button></div>
         <div class="channel-tools"><input id="channelSearch" placeholder="Filter channels…" /><small>CLICK A CHANNEL TO INSPECT THE SELECTED LAP</small><span id="channelCount"></span></div>
         <div class="table-wrap"><table><thead><tr><th>CHANNEL</th><th>UNIT</th><th>TYPE</th><th>NATIVE RATE</th><th>SAMPLES</th><th>DURATION</th></tr></thead><tbody id="channelRows"></tbody></table></div>
       </div>
@@ -195,20 +207,98 @@ async function init() {
   }
 }
 
-function candidateChannels(rows: Row[]): string[] {
+function normalizedName(value: unknown) { return String(value).toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+function detectSignalRoles(rows: Row[]): SignalRoles {
   const sampled = rows.filter((row) => Number(row.sample_count) > 0);
-  const normalized = (value: unknown) => String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
-  const pick = (exact: string[], fallback: RegExp, exclude?: RegExp) => exact.map((wanted) => sampled.find((row) => normalized(row.name) === wanted)).find(Boolean)
+  const pick = (exact: string[], fallback: RegExp, exclude?: RegExp) => exact.map((wanted) => sampled.find((row) => normalizedName(row.name) === wanted)).find(Boolean)
     || sampled.find((row) => fallback.test(String(row.name)) && !exclude?.test(String(row.name)));
-  const matches = [
-    pick(['groundspeed', 'speedref', 'corrspeed', 'vehiclespeed', 'gpsspeed', 'speed', 'velocitykmh'], /speed|velocity/i, /engine|wheel|target|limit/i),
-    pick(['throttlepos', 'driverthrottlepos', 'throttlepedal', 'throttle'], /throttle/i),
-    pick(['brakepedalpos', 'driverbrakepressure', 'brakepressure', 'brake'], /brake|p_f_brake/i),
-    pick(['gforcelat', 'lateralacceleration', 'glat'], /accel.*lat|lat.*accel|glat|g force lat/i),
-    pick(['gforcelong', 'longitudinalacceleration', 'glong'], /accel.*long|long.*accel|glong|g force long/i),
-    pick(['gear'], /(^|[^a-z])gear([^a-z]|$)/i),
-  ];
-  return matches.filter((row): row is Row => Boolean(row)).map((row) => String(row.name)).filter((name, index, names) => names.indexOf(name) === index).slice(0, 6);
+  const name = (row: Row | undefined) => String(row?.name || '');
+  return {
+    speed: name(pick(['groundspeed', 'speedref', 'corrspeed', 'vehiclespeed', 'gpsspeed', 'speed', 'velocitykmh'], /speed|velocity/i, /engine|wheel|target|limit/i)),
+    throttle: name(pick(['throttlepos', 'driverthrottlepos', 'throttlepedal', 'throttle'], /throttle/i)),
+    brake: name(pick(['brakepedalpos', 'driverbrakepressure', 'brakepressure', 'brake'], /brake|p_f_brake/i)),
+    gLat: name(pick(['gforcelat', 'lateralacceleration', 'glat'], /accel.*lat|lat.*accel|glat|g force lat/i)),
+    gLong: name(pick(['gforcelong', 'longitudinalacceleration', 'glong'], /accel.*long|long.*accel|glong|g force long/i)),
+    distance: name(pick(['lapdistancecorrected', 'lapdistance', 'lapdist', 'lapdistpct', 'distance'], /lap.*dist|distance/i)),
+  };
+}
+
+function roleStorageKey() {
+  const signature = metadata.map((row) => normalizedName(row.name)).sort().join('|');
+  let hash = 5381;
+  for (const char of signature) hash = ((hash << 5) + hash) ^ char.charCodeAt(0);
+  return `telemetry-roles:${String(metadata[0]?.format || 'unknown')}:${hash >>> 0}`;
+}
+
+function initializeSignalRoles() {
+  signalRoles = detectSignalRoles(metadata);
+  try {
+    const saved = JSON.parse(localStorage.getItem(roleStorageKey()) || '{}') as Partial<SignalRoles>;
+    const available = new Set(metadata.map((row) => String(row.name)));
+    for (const key of Object.keys(signalRoles) as RoleKey[]) if (saved[key] && available.has(saved[key]!)) signalRoles[key] = saved[key]!;
+  } catch { /* Ignore malformed local preferences. */ }
+  renderRoleEditor();
+}
+
+function candidateChannels(_rows: Row[]): string[] {
+  return [signalRoles.speed, signalRoles.throttle, signalRoles.brake, signalRoles.gLat, signalRoles.gLong]
+    .filter((name, index, names) => Boolean(name) && names.indexOf(name) === index).slice(0, 3);
+}
+
+function renderRoleEditor() {
+  const labels: Record<RoleKey, string> = { speed: 'SPEED', throttle: 'THROTTLE', brake: 'BRAKE', gLat: 'LAT G', gLong: 'LONG G', distance: 'LAP DISTANCE' };
+  const channels = metadata.filter((row) => Number(row.sample_count) > 0).map((row) => String(row.name));
+  $('#roleSelects').innerHTML = (Object.keys(labels) as RoleKey[]).map((key) => `<label><span>${labels[key]}</span><select data-role="${key}"><option value="">NOT SET</option>${channels.map((name) => `<option value="${escapeHtml(name)}" ${signalRoles[key] === name ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}</select></label>`).join('');
+  document.querySelectorAll<HTMLSelectElement>('[data-role]').forEach((select) => select.onchange = async () => {
+    signalRoles[select.dataset.role as RoleKey] = select.value;
+    localStorage.setItem(roleStorageKey(), JSON.stringify(signalRoles));
+    await refreshSignalAnalysis();
+  });
+}
+
+async function refreshSignalAnalysis() {
+  await renderInsights();
+  setPresets(true);
+  renderRoleEditor();
+}
+
+async function sha256(bytes: ArrayBuffer) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function fetchExampleBytes(example: ExampleRun, progress: HTMLElement | null): Promise<ArrayBuffer> {
+  const cache = 'caches' in window ? await caches.open('telemetry-demo-v1') : null;
+  const cached = await cache?.match(example.url);
+  if (cached) {
+    const bytes = await cached.arrayBuffer();
+    if (await sha256(bytes) === example.sha256) {
+      if (progress) progress.textContent = `CACHED · ${example.size}`;
+      return bytes;
+    }
+    await cache?.delete(example.url);
+  }
+  const response = await fetch(example.url);
+  if (!response.ok) throw new Error(`Example download failed: HTTP ${response.status}`);
+  const total = Number(response.headers.get('content-length')) || 0;
+  const reader = response.body?.getReader();
+  const chunks: Uint8Array[] = []; let received = 0;
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      chunks.push(value); received += value.length;
+      const percent = total ? ` · ${Math.round(received / total * 100)}%` : '';
+      if (progress) progress.textContent = `FETCHING ${formatBytes(received)}${percent}`;
+      setRuntime(`Downloading ${example.name}${percent}`, 'loading');
+    }
+  }
+  const bytes = reader ? new Uint8Array(received) : new Uint8Array(await response.arrayBuffer());
+  let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  const buffer = bytes.buffer;
+  if (await sha256(buffer) !== example.sha256) throw new Error('Demo checksum did not match its pinned source');
+  await cache?.put(example.url, new Response(buffer.slice(0), { headers: { 'content-type': 'application/octet-stream' } }));
+  return buffer;
 }
 
 async function loadExample(index: number, button: HTMLButtonElement) {
@@ -216,13 +306,11 @@ async function loadExample(index: number, button: HTMLButtonElement) {
   if (!example || !conn) return;
   button.disabled = true;
   const original = button.querySelector('b')?.textContent || '';
-  const progress = button.querySelector('b');
+  const progress = button.querySelector<HTMLElement>('b');
   if (progress) progress.textContent = `FETCHING ${example.size}…`;
   setRuntime(`Downloading ${example.name}`, 'loading');
   try {
-    const response = await fetch(example.url);
-    if (!response.ok) throw new Error(`Example download failed: HTTP ${response.status}`);
-    const bytes = await response.arrayBuffer();
+    const bytes = await fetchExampleBytes(example, progress);
     await loadFile(new File([bytes], `${example.name.replaceAll(/[^a-z0-9]+/gi, '_')}.ld`));
   } catch (error) {
     setRuntime('Could not load public example', 'error');
@@ -270,6 +358,7 @@ function drawTrackMap() {
   const minX = Math.min(...xs); const maxX = Math.max(...xs); const minY = Math.min(...ys); const maxY = Math.max(...ys);
   const pad = 35; const scale = Math.min((rect.width - pad * 2) / (maxX - minX || 1), (height - pad * 2) / (maxY - minY || 1));
   const project = (point: { x: number; y: number }) => ({ x: (rect.width - (maxX - minX) * scale) / 2 + (point.x - minX) * scale, y: (height + (maxY - minY) * scale) / 2 - (point.y - minY) * scale });
+  mapScreenPoints = points.map((point) => ({ ...project(point), time: point.time }));
   const stroke = (subset: typeof points, color: string, width: number) => {
     if (subset.length < 2) return; ctx.beginPath();
     subset.forEach((point, index) => { const p = project(point); if (index) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y); });
@@ -281,8 +370,56 @@ function drawTrackMap() {
   if (selected.length) {
     const start = project(selected[0]); ctx.fillStyle = '#ff5c35'; ctx.beginPath(); ctx.arc(start.x, start.y, 5, 0, Math.PI * 2); ctx.fill();
   }
+  if (scrubTimeNs !== null && mapScreenPoints.length) {
+    const marker = mapScreenPoints.reduce((best, point) => Math.abs(point.time - scrubTimeNs!) < Math.abs(best.time - scrubTimeNs!) ? point : best);
+    ctx.fillStyle = '#49b9ff'; ctx.strokeStyle = '#e9edeb'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(marker.x, marker.y, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
   $('#mapLapLabel').textContent = activeLap.label;
   $('#mapCoords').textContent = `${meanLat.toFixed(4)}°, ${(longitudes.reduce((sum, value) => sum + value, 0) / longitudes.length).toFixed(4)}°`;
+}
+
+function scrubMap(clientX: number, clientY: number) {
+  if (!activeLap || !mapScreenPoints.length || !plotRows.length) return;
+  const rect = $<HTMLCanvasElement>('#trackMap').getBoundingClientRect(); const x = clientX - rect.left; const y = clientY - rect.top;
+  const inLap = mapScreenPoints.filter((point) => point.time >= activeLap!.startNs && point.time < activeLap!.endNs);
+  if (!inLap.length) return;
+  const nearest = inLap.reduce((best, point) => Math.hypot(point.x - x, point.y - y) < Math.hypot(best.x - x, best.y - y) ? point : best);
+  let plotIndex = 0; let timeError = Infinity;
+  plotRows.forEach((row, index) => { const error = Math.abs(Number(row.time_ns) - nearest.time); if (error < timeError) { plotIndex = index; timeError = error; } });
+  const progress = rowProgress(plotRows, plotIndex); showScrubAtProgress(progress);
+  const row = plotRows[plotIndex]; const elapsed = (Number(row.time_ns) - activeLap.startNs) / 1e9;
+  const speed = signalRoles.speed ? speedToKmh(Number(row[signalRoles.speed]), channelUnit(signalRoles.speed)) : NaN;
+  const tooltip = $('#mapTooltip'); tooltip.style.left = `${nearest.x}px`; tooltip.style.top = `${nearest.y}px`;
+  tooltip.innerHTML = `<strong>${activeLap.label} · +${elapsed.toFixed(3)} s</strong>${Number.isFinite(speed) ? `<span>SPEED <b>${formatNumber(speed, 1)} km/h</b></span>` : ''}${signalRoles.throttle ? `<span>THROTTLE <b>${formatNumber(row[signalRoles.throttle], 1)}</b></span>` : ''}${signalRoles.brake ? `<span>BRAKE <b>${formatNumber(row[signalRoles.brake], 1)}</b></span>` : ''}`;
+  tooltip.classList.remove('hidden');
+}
+
+function detectVboLapCrossings(bytes: Uint8Array): number[] {
+  const text = new TextDecoder().decode(bytes); const lines = text.split(/\r?\n/); let section = '';
+  let columns: string[] = []; const data: number[][] = []; let gate: number[] | null = null;
+  for (const raw of lines) {
+    const line = raw.trim(); if (!line) continue;
+    const match = line.match(/^\[([^\]]+)\]$/); if (match) { section = match[1].toLowerCase(); continue; }
+    if (section === 'column names' && !columns.length) columns = line.split(/\s+/).map((value) => value.toLowerCase());
+    else if (section === 'laptiming' && /^start\s/i.test(line)) {
+      const values = line.match(/[+-]?\d+(?:\.\d+)?/g)?.map(Number) || []; if (values.length >= 4) gate = values.slice(0, 4);
+    } else if (section === 'data') data.push(line.split(/\s+/).map(Number));
+  }
+  const lat = columns.indexOf('latitude'); const lon = columns.indexOf('longitude'); const time = columns.indexOf('time');
+  if (!gate || lat < 0 || lon < 0 || time < 0 || data.length < 2) return [];
+  const intersects = (a: number[], b: number[], c: number[], d: number[]) => {
+    const cross = (p: number[], q: number[], r: number[]) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    return cross(a, b, c) * cross(a, b, d) <= 0 && cross(c, d, a) * cross(c, d, b) <= 0;
+  };
+  const seconds = (value: number) => { const hours = Math.floor(value / 10000); const minutes = Math.floor(value / 100) % 100; return hours * 3600 + minutes * 60 + value % 100; };
+  const origin = seconds(data[0][time]); const crossings: number[] = [];
+  for (let index = 1; index < data.length; index++) {
+    if (intersects([data[index - 1][lon], data[index - 1][lat]], [data[index][lon], data[index][lat]], [gate[0], gate[1]], [gate[2], gate[3]])) {
+      let elapsed = seconds(data[index][time]) - origin; if (elapsed < 0) elapsed += 86400;
+      const ns = Math.round(elapsed * 1e9); if (!crossings.length || ns - crossings.at(-1)! > 10_000_000_000) crossings.push(ns);
+    }
+  }
+  return crossings;
 }
 
 async function loadFile(file: File) {
@@ -294,13 +431,16 @@ async function loadFile(file: File) {
     if (activeFile) await db.dropFile(activeFile).catch(() => undefined);
     activeFile = `active_run.${extension}`;
     activeDisplayName = file.name;
-    await db.registerFileBuffer(activeFile, new Uint8Array(await file.arrayBuffer()));
+    const fileBytes = new Uint8Array(await file.arrayBuffer());
+    vboLapCrossings = extension === 'vbo' ? detectVboLapCrossings(fileBytes) : [];
+    await db.registerFileBuffer(activeFile, fileBytes);
     metadata = arrowRows(await conn.query(`SELECT * FROM telemetry_metadata(${sqlLiteral(activeFile)}) ORDER BY name`));
     if (!metadata.length) throw new Error('The parser found no telemetry channels');
     $('#workspace').classList.remove('hidden');
     $('#fileName').textContent = file.name;
     $('#fileFormat').textContent = String(metadata[0].format).toUpperCase();
     $('#fileSize').textContent = formatBytes(file.size);
+    initializeSignalRoles();
     renderChannels(metadata);
     await renderInsights();
     await loadTrackMap();
@@ -311,6 +451,45 @@ async function loadFile(file: File) {
     console.error(error); setRuntime('Could not parse telemetry', 'error');
     toast(error instanceof Error ? error.message : String(error), true);
   }
+}
+
+function channelUnit(name: string) { return String(metadata.find((row) => String(row.name) === name)?.unit || ''); }
+function speedToKmh(value: number, unit: string) {
+  const normalized = unit.toLowerCase().replaceAll(' ', '');
+  if (normalized === 'm/s' || normalized === 'mps') return value * 3.6;
+  if (normalized === 'mph') return value * 1.609344;
+  return value;
+}
+function accelerationToG(value: number, unit: string) {
+  const normalized = unit.toLowerCase().replaceAll(' ', '');
+  return normalized.includes('m/s') || normalized.includes('m.s') ? value / 9.80665 : value;
+}
+
+async function renderPerformanceMetrics(completeLaps: Lap[]) {
+  const best = [...completeLaps].sort((a, b) => a.durationNs - b.durationNs)[0];
+  let topSpeed: number | null = null; let peakDirectional: number | null = null; let peakCombined: number | null = null;
+  if (signalRoles.speed) {
+    const row = arrowRows(await conn.query(`SELECT max(value) AS value FROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(signalRoles.speed)})`))[0];
+    topSpeed = speedToKmh(Number(row?.value), channelUnit(signalRoles.speed));
+  }
+  const directional = await Promise.all([signalRoles.gLat, signalRoles.gLong].filter(Boolean).map(async (channel) => {
+    const row = arrowRows(await conn.query(`SELECT max(abs(value)) AS value FROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(channel)})`))[0];
+    return accelerationToG(Number(row?.value), channelUnit(channel));
+  }));
+  if (directional.length) peakDirectional = Math.max(...directional.filter(Number.isFinite));
+  if (signalRoles.gLat && signalRoles.gLong) {
+    const latFactor = accelerationToG(1, channelUnit(signalRoles.gLat));
+    const longFactor = accelerationToG(1, channelUnit(signalRoles.gLong));
+    const row = arrowRows(await conn.query(`SELECT max(sqrt(pow(${quoteIdent(signalRoles.gLat)} * ${latFactor}, 2) + pow(${quoteIdent(signalRoles.gLong)} * ${longFactor}, 2))) AS value FROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100, channels := ${sqlLiteral(`${signalRoles.gLat},${signalRoles.gLong}`)})`))[0];
+    peakCombined = Number(row?.value);
+  }
+  const cards = [
+    ['TOP SPEED', topSpeed === null || !Number.isFinite(topSpeed) ? '—' : `${formatNumber(topSpeed, 1)} km/h`, signalRoles.speed || 'speed role not set'],
+    ['HIGHEST DIRECTIONAL G', peakDirectional === null || !Number.isFinite(peakDirectional) ? '—' : `${formatNumber(peakDirectional, 3)} g`, [signalRoles.gLat, signalRoles.gLong].filter(Boolean).join(' · ') || 'G roles not set'],
+    ['PEAK COMBINED G', peakCombined === null || !Number.isFinite(peakCombined) ? '—' : `${formatNumber(peakCombined, 3)} g`, signalRoles.gLat && signalRoles.gLong ? '100 Hz synchronized resultant' : 'both G roles required'],
+    ['BEST COMPLETE LAP', best ? formatDuration(best.durationNs) : '—', best?.label || 'no complete lap detected'],
+  ];
+  $('#performanceMetrics').innerHTML = cards.map(([label, value, note]) => `<article><small>${label}</small><strong>${value}</strong><p>${escapeHtml(note)}</p></article>`).join('');
 }
 
 async function renderInsights() {
@@ -343,7 +522,10 @@ async function renderInsights() {
   laps = await detectLaps(duration);
   const complete = laps.filter((lap) => lap.complete && lap.durationNs > 5_000_000_000);
   activeLap = complete.sort((a, b) => a.durationNs - b.durationNs)[0] || laps[0];
+  compareLap = laps.find((lap) => lap !== activeLap && lap.complete) || null;
+  await renderPerformanceMetrics(complete);
   renderLapRail();
+  renderCompareSelector();
   await loadLapTrace();
 }
 
@@ -375,6 +557,36 @@ async function detectLaps(sessionDurationNs: number): Promise<Lap[]> {
       }).filter((lap) => lap.durationNs > 0);
     }
   }
+  if (vboLapCrossings.length) {
+    const starts = [0, ...vboLapCrossings];
+    return starts.map((startNs, index) => {
+      const endNs = starts[index + 1] ?? sessionDurationNs;
+      return { number: index + 1, label: `LAP ${index + 1}`, startNs, endNs, durationNs: endNs - startNs, complete: index > 0 && index < starts.length - 1 };
+    }).filter((lap) => lap.durationNs > 0);
+  }
+  const sampled = metadata.filter((row) => Number(row.sample_count) > 0);
+  const exact = (names: string[]) => names.map((wanted) => sampled.find((row) => normalizedName(row.name) === wanted)).find(Boolean);
+  const timer = exact(['lapcurrentlaptime', 'laptime', 'laptimerunning']);
+  const distance = exact(['lapdistancecorrected', 'lapdistance', 'lapdist', 'lapdistpct']);
+  const resetChannel = timer || distance;
+  if (resetChannel) {
+    const threshold = timer ? 5 : 20;
+    const resets = arrowRows(await conn.query(`
+      WITH ordered AS (
+        SELECT time_ns, value, lag(value) OVER (ORDER BY time_ns) AS previous
+        FROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(String(resetChannel.name))})
+      )
+      SELECT time_ns FROM ordered
+      WHERE previous IS NOT NULL AND previous - value > ${threshold}
+      ORDER BY time_ns`)).map((row) => Number(row.time_ns)).filter((time, index, times) => !index || time - times[index - 1] > 5_000_000_000);
+    if (resets.length) {
+      const starts = [0, ...resets];
+      return starts.map((startNs, index) => {
+        const endNs = starts[index + 1] ?? sessionDurationNs;
+        return { number: index + 1, label: `LAP ${index + 1}`, startNs, endNs, durationNs: endNs - startNs, complete: index > 0 && index < starts.length - 1 };
+      }).filter((lap) => lap.durationNs > 0);
+    }
+  }
   return [{ number: 1, label: 'SESSION', startNs: 0, endNs: sessionDurationNs, durationNs: sessionDurationNs, complete: true }];
 }
 
@@ -387,22 +599,52 @@ function renderLapRail() {
   $('#traceLapLabel').textContent = `${activeLap.label} · ${formatDuration(activeLap.durationNs)}`;
 }
 
+function renderCompareSelector() {
+  const select = $<HTMLSelectElement>('#compareLap');
+  select.innerHTML = `<option value="">NO REFERENCE</option>${laps.map((lap, index) => `<option value="${index}" ${lap === compareLap ? 'selected' : ''} ${lap === activeLap ? 'disabled' : ''}>${lap.label} · ${formatDuration(lap.durationNs)}${lap.complete ? '' : ' · PARTIAL'}</option>`).join('')}`;
+  $('#comparisonStatus').textContent = signalRoles.distance ? `${signalRoles.distance} · SOLID VS DASHED` : 'NORMALIZED LAP PROGRESS · SOLID VS DASHED';
+}
+
 async function selectLap(lap: Lap) {
+  const previous = activeLap;
   activeLap = lap;
+  if (compareLap === activeLap) compareLap = previous && previous !== activeLap ? previous : laps.find((item) => item !== activeLap) || null;
   renderLapRail();
+  renderCompareSelector();
   await loadLapTrace();
   setPresets(true);
   drawTrackMap();
   if (inspectedChannel) await inspectChannel(inspectedChannel);
 }
 
+function rowProgress(rows: Row[], index: number) {
+  if (!rows.length) return 0;
+  if (signalRoles.distance) {
+    const values = rows.map((row) => Number(row[signalRoles.distance])).filter(Number.isFinite);
+    const value = Number(rows[index]?.[signalRoles.distance]);
+    if (values.length > 1 && Number.isFinite(value)) {
+      const min = Math.min(...values); const max = Math.max(...values);
+      if (max > min) return Math.max(0, Math.min(1, (value - min) / (max - min)));
+    }
+  }
+  return index / Math.max(rows.length - 1, 1);
+}
+
+function rowAtProgress(rows: Row[], progress: number) {
+  if (!rows.length) return undefined;
+  let best = rows[0]; let error = Infinity;
+  rows.forEach((row, index) => { const difference = Math.abs(rowProgress(rows, index) - progress); if (difference < error) { best = row; error = difference; } });
+  return best;
+}
+
 async function loadLapTrace() {
-  plotRows = [];
+  plotRows = []; compareRows = []; scrubTimeNs = null;
   $('#scrubber').classList.add('hidden');
-  if (activeLap && plotChannels.length && activeLap.durationNs > 0) {
-    const seconds = activeLap.durationNs / 1e9;
-    const rate = Math.min(100, Math.max(10, Math.ceil(5_000 / Math.max(seconds, 1))));
-    plotRows = arrowRows(await conn.query(`SELECT * FROM read_telemetry(${sqlLiteral(activeFile)}, rate := ${rate}, channels := ${sqlLiteral(plotChannels.join(','))}, start_ns := ${Math.round(activeLap.startNs)}, end_ns := ${Math.round(activeLap.endNs)})`));
+  const channels = [...new Set([...plotChannels, signalRoles.distance].filter(Boolean))];
+  if (activeLap && channels.length && activeLap.durationNs > 0) {
+    const rate = Math.min(100, Math.max(10, Math.ceil(5_000 / Math.max(activeLap.durationNs / 1e9, 1))));
+    plotRows = arrowRows(await conn.query(`SELECT * FROM read_telemetry(${sqlLiteral(activeFile)}, rate := ${rate}, channels := ${sqlLiteral(channels.join(','))}, start_ns := ${Math.round(activeLap.startNs)}, end_ns := ${Math.round(activeLap.endNs)})`));
+    if (compareLap) compareRows = arrowRows(await conn.query(`SELECT * FROM read_telemetry(${sqlLiteral(activeFile)}, rate := ${rate}, channels := ${sqlLiteral(channels.join(','))}, start_ns := ${Math.round(compareLap.startNs)}, end_ns := ${Math.round(compareLap.endNs)})`));
   }
   drawTrace();
 }
@@ -418,30 +660,37 @@ function drawTrace() {
   const colors = ['#d8ff32', '#ff5c35', '#49b9ff'];
   $('#traceLegend').innerHTML = plotChannels.map((name, i) => `<span><i style="background:${colors[i]}"></i>${name}</span>`).join('');
   plotChannels.forEach((channel, index) => {
-    const values = plotRows.map((row) => Number(row[channel])).filter(Number.isFinite);
+    const values = [...plotRows, ...compareRows].map((row) => Number(row[channel])).filter(Number.isFinite);
     if (values.length < 2) return;
-    const min = Math.min(...values); const max = Math.max(...values); const span = max - min || 1;
-    ctx.strokeStyle = colors[index]; ctx.lineWidth = index === 0 ? 2 : 1.4; ctx.beginPath();
-    plotRows.forEach((row, i) => {
-      const value = Number(row[channel]); if (!Number.isFinite(value)) return;
-      const x = (i / Math.max(plotRows.length - 1, 1)) * width;
-      const band = height / plotChannels.length; const y = index * band + 10 + (1 - (value - min) / span) * (band - 22);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    }); ctx.stroke();
+    const min = Math.min(...values); const max = Math.max(...values); const span = max - min || 1; const band = height / plotChannels.length;
+    const stroke = (rows: Row[], dashed: boolean) => {
+      if (rows.length < 2) return; ctx.beginPath(); ctx.setLineDash(dashed ? [5, 5] : []); ctx.globalAlpha = dashed ? .58 : 1;
+      rows.forEach((row, i) => {
+        const value = Number(row[channel]); if (!Number.isFinite(value)) return;
+        const x = rowProgress(rows, i) * width; const y = index * band + 10 + (1 - (value - min) / span) * (band - 22);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = colors[index]; ctx.lineWidth = dashed ? 1 : index === 0 ? 2 : 1.4; ctx.stroke();
+    };
+    stroke(compareRows, true); stroke(plotRows, false); ctx.setLineDash([]); ctx.globalAlpha = 1;
   });
 }
 
-function scrubTrace(clientX: number) {
+function showScrubAtProgress(ratio: number, reveal = true) {
   if (!plotRows.length || !activeLap) return;
-  const canvas = $<HTMLCanvasElement>('#trace');
-  const rect = canvas.getBoundingClientRect();
-  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-  const row = plotRows[Math.round(ratio * (plotRows.length - 1))];
+  const row = rowAtProgress(plotRows, ratio); if (!row) return;
+  const compare = rowAtProgress(compareRows, ratio);
   const elapsed = (Number(row.time_ns) - activeLap.startNs) / 1e9;
-  const scrubber = $('#scrubber');
-  scrubber.style.left = `${ratio * 100}%`;
-  $('#scrubValues').innerHTML = `<strong>+${elapsed.toFixed(3)} s</strong>${plotChannels.map((channel, index) => `<span><i style="background:${['#d8ff32', '#ff5c35', '#49b9ff'][index]}"></i>${escapeHtml(channel)} <b>${formatNumber(row[channel], 3)}</b></span>`).join('')}`;
-  scrubber.classList.remove('hidden');
+  const compareElapsed = compare && compareLap ? (Number(compare.time_ns) - compareLap.startNs) / 1e9 : null;
+  const delta = compareElapsed === null ? '' : `<span class="delta">DELTA TO ${escapeHtml(compareLap!.label)} <b>${elapsed - compareElapsed >= 0 ? '+' : ''}${(elapsed - compareElapsed).toFixed(3)} s</b></span>`;
+  const scrubber = $('#scrubber'); scrubber.style.left = `${ratio * 100}%`;
+  $('#scrubValues').innerHTML = `<strong>+${elapsed.toFixed(3)} s · ${(ratio * 100).toFixed(1)}%</strong>${plotChannels.map((channel, index) => `<span><i style="background:${['#d8ff32', '#ff5c35', '#49b9ff'][index]}"></i>${escapeHtml(channel)} <b>${formatNumber(row[channel], 3)}</b></span>`).join('')}${delta}`;
+  scrubber.classList.toggle('hidden', !reveal); scrubTimeNs = Number(row.time_ns); drawTrackMap();
+}
+
+function scrubTrace(clientX: number) {
+  const rect = $<HTMLCanvasElement>('#trace').getBoundingClientRect();
+  showScrubAtProgress(Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)));
 }
 
 async function inspectChannel(name: string) {
@@ -514,25 +763,26 @@ function setPresets(preserveEditor = false) {
   const lap = activeLap || { startNs: 0, endNs: 10_000_000_000, label: 'SESSION' };
   const start = Math.round(lap.startNs); const end = Math.round(lap.endNs);
   const sampled = metadata.filter((row) => Number(row.sample_count) > 0);
-  const find = (pattern: RegExp, exclude?: RegExp) => String(sampled.find((row) => pattern.test(String(row.name)) && !exclude?.test(String(row.name)))?.name || '');
-  const normalized = (value: unknown) => String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
-  const findExact = (names: string[]) => String(names.map((wanted) => sampled.find((row) => normalized(row.name) === wanted)).find(Boolean)?.name || '');
-  const speed = findExact(['groundspeed', 'speedref', 'corrspeed', 'vehiclespeed', 'gpsspeed', 'speed', 'velocitykmh']) || find(/speed|velocity/i, /engine|wheel|target|limit/i) || first;
-  const throttle = findExact(['throttlepos', 'driverthrottlepos', 'throttlepedal', 'throttle']) || find(/throttle/i);
-  const brake = findExact(['brakepedalpos', 'driverbrakepressure', 'brakepressure', 'brake']) || find(/brake/i);
+  const find = (pattern: RegExp) => String(sampled.find((row) => pattern.test(String(row.name)))?.name || '');
+  const speed = signalRoles.speed || first;
+  const throttle = signalRoles.throttle;
+  const brake = signalRoles.brake;
   const gear = find(/(^|[^a-z])gear([^a-z]|$)/i);
-  const gLat = find(/g.?force.?lat|lateral.?accel|accel.*lat|glat/i);
-  const gLong = find(/g.?force.?(long|lon)|longitudinal.?accel|accel.*(long|lon)|glong/i);
+  const gLat = signalRoles.gLat;
+  const gLong = signalRoles.gLong;
   const gChannels = [...new Set([gLat, gLong].filter(Boolean))];
+  const speedFactor = speedToKmh(1, channelUnit(speed));
+  const gFactors = Object.fromEntries(gChannels.map((channel) => [channel, accelerationToG(1, channelUnit(channel))]));
+  const gCase = gChannels.map((channel) => `WHEN ${sqlLiteral(channel)} THEN ${gFactors[channel]}`).join(' ');
   const presets: Record<string, string> = {
     metadata: `SELECT name, unit, frequency_hz, sample_count\nFROM telemetry_metadata(${sqlLiteral(activeFile)})\nWHERE sample_count > 0\nORDER BY name;`,
     stats: `SELECT channel, any_value(unit) AS unit,\n       count(*) AS samples, min(value), avg(value), max(value)\nFROM telemetry_samples(${sqlLiteral(activeFile)},\n     channel := ${sqlLiteral(candidates.join(','))},\n     start_ns := ${start}, end_ns := ${end})\nGROUP BY channel\nORDER BY channel;`,
     samples: `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, value\nFROM telemetry_samples(${sqlLiteral(activeFile)},\n     channel := ${sqlLiteral(first)},\n     start_ns := ${start}, end_ns := ${end})\nORDER BY time_ns\nLIMIT 500;`,
   };
   const recipes = [
-    ['Top speed in session', speed, `SELECT max(value) AS top_speed, any_value(unit) AS unit,\n       arg_max(time_ns, value) / 1e9 AS session_seconds\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(speed)});`],
-    ['Highest G in session', gChannels.length ? gChannels.join(' + ') : 'No G channel detected', gChannels.length ? `SELECT arg_max(channel, abs(value)) AS channel,\n       arg_max(value, abs(value)) AS signed_g,\n       max(abs(value)) AS peak_absolute_g,\n       arg_max(time_ns, abs(value)) / 1e9 AS session_seconds\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(gChannels.join(','))});` : `SELECT 'No lateral or longitudinal G channel was detected' AS message;`],
-    ['Peak combined G', gLat && gLong ? `${gLat} + ${gLong}` : 'Requires lateral and longitudinal G', gLat && gLong ? `WITH g AS (\n  SELECT time_ns, sqrt(pow(${quoteIdent(gLat)}, 2) + pow(${quoteIdent(gLong)}, 2)) AS combined_g\n  FROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n       channels := ${sqlLiteral(`${gLat},${gLong}`)})\n)\nSELECT max(combined_g) AS peak_combined_g,\n       arg_max(time_ns, combined_g) / 1e9 AS session_seconds\nFROM g;` : `SELECT 'Both lateral and longitudinal G channels are required' AS message;`],
+    ['Top speed in session', `${speed} · normalized to km/h`, `SELECT max(value) * ${speedFactor} AS top_speed_kmh,\n       arg_max(time_ns, value) / 1e9 AS session_seconds\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(speed)});`],
+    ['Highest G in session', gChannels.length ? `${gChannels.join(' + ')} · normalized to g` : 'No G channel detected', gChannels.length ? `WITH normalized AS (\n  SELECT channel, time_ns, value * CASE channel ${gCase} END AS value_g\n  FROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(gChannels.join(','))})\n)\nSELECT arg_max(channel, abs(value_g)) AS channel,\n       arg_max(value_g, abs(value_g)) AS signed_g,\n       max(abs(value_g)) AS peak_absolute_g,\n       arg_max(time_ns, abs(value_g)) / 1e9 AS session_seconds\nFROM normalized;` : `SELECT 'No lateral or longitudinal G channel was detected' AS message;`],
+    ['Peak combined G', gLat && gLong ? `${gLat} + ${gLong} · normalized to g` : 'Requires lateral and longitudinal G', gLat && gLong ? `WITH g AS (\n  SELECT time_ns, sqrt(pow(${quoteIdent(gLat)} * ${gFactors[gLat]}, 2) + pow(${quoteIdent(gLong)} * ${gFactors[gLong]}, 2)) AS combined_g\n  FROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n       channels := ${sqlLiteral(`${gLat},${gLong}`)})\n)\nSELECT max(combined_g) AS peak_combined_g,\n       arg_max(time_ns, combined_g) / 1e9 AS session_seconds\nFROM g;` : `SELECT 'Both lateral and longitudinal G channels are required' AS message;`],
     ['Native rate audit', 'Compare logger clocks and volume', `SELECT frequency_hz, count(*) AS channels, sum(sample_count) AS samples\nFROM telemetry_metadata(${sqlLiteral(activeFile)})\nWHERE sample_count > 0\nGROUP BY frequency_hz ORDER BY frequency_hz DESC;`],
     ['Current lap · wide', '100 Hz interpolated channel set', `SELECT (time_ns - ${start}) / 1e9 AS lap_seconds, * EXCLUDE (time_ns)\nFROM read_telemetry(${sqlLiteral(activeFile)}, rate := 100,\n     channels := ${sqlLiteral(candidates.join(','))},\n     start_ns := ${start}, end_ns := ${end})\nLIMIT 1000;`],
     ['Percentile envelope', `Distribution of ${speed}`, `SELECT quantile_cont(value, [0, .01, .1, .5, .9, .99, 1]) AS percentiles\nFROM telemetry_samples(${sqlLiteral(activeFile)}, channel := ${sqlLiteral(speed)});`],
@@ -592,9 +842,17 @@ $('#channelRows').addEventListener('click', (event) => {
 });
 $('#closeInspector').addEventListener('click', closeInspector);
 $('#inspectorScrim').addEventListener('click', closeInspector);
+$('#resetRoles').addEventListener('click', async () => {
+  localStorage.removeItem(roleStorageKey()); signalRoles = detectSignalRoles(metadata); renderRoleEditor(); await refreshSignalAnalysis();
+});
+$('#compareLap').addEventListener('change', async (event) => {
+  const value = (event.target as HTMLSelectElement).value; compareLap = value === '' ? null : laps[Number(value)]; await loadLapTrace(); renderCompareSelector();
+});
 $('#trace').addEventListener('pointermove', (event) => scrubTrace(event.clientX));
 $('#trace').addEventListener('pointerdown', (event) => scrubTrace(event.clientX));
 $('#trace').addEventListener('pointerleave', () => $('#scrubber').classList.add('hidden'));
+$('#trackMap').addEventListener('pointermove', (event) => scrubMap(event.clientX, event.clientY));
+$('#trackMap').addEventListener('pointerleave', () => $('#mapTooltip').classList.add('hidden'));
 const drop = $('#dropZone');
 for (const type of ['dragenter', 'dragover']) drop.addEventListener(type, (event) => { event.preventDefault(); drop.classList.add('dragging'); });
 for (const type of ['dragleave', 'drop']) drop.addEventListener(type, (event) => { event.preventDefault(); drop.classList.remove('dragging'); });
