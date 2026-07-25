@@ -1,6 +1,6 @@
 #[cfg(not(target_os = "emscripten"))]
 use memmap2::Mmap;
-use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource};
+use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource, UnitSource};
 #[cfg(not(target_os = "emscripten"))]
 use std::fs::File;
 #[cfg(not(target_os = "emscripten"))]
@@ -157,6 +157,12 @@ impl MotecFile {
             // (32 bytes), short name at 0x40 (8 bytes) and unit at 0x48 (12
             // bytes).
             let unit = text(&data, address + 0x48, 12);
+            // LD channel blocks carry a real unit string; absent means unknown.
+            let unit_source = if unit.is_empty() {
+                UnitSource::Unknown
+            } else {
+                UnitSource::Declared
+            };
             let valid_width = matches!(width, 2 | 4 | 8);
             let count = if valid_width && data_ptr < data.len() as u64 {
                 requested_count.min((data.len() as u64 - data_ptr) / width as u64)
@@ -188,6 +194,7 @@ impl MotecFile {
                 id: channels.len() as u32,
                 name,
                 unit,
+                unit_source,
                 sample_type,
                 chunks,
                 sample_count: count,

@@ -3,7 +3,7 @@
 //! These assert bit-exact recovery of every sample, not approximate equality.
 
 use motec_telemetry::{write_motec, write_motec_bytes, MotecFile, MotecMetadata, MotecWriteError};
-use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource};
+use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource, UnitSource};
 
 /// An in-memory source used to drive the writer with controlled shapes.
 struct Synthetic {
@@ -42,6 +42,12 @@ fn single_chunk(
             id,
             name: name.into(),
             unit: unit.into(),
+            // A unit given here stands in for one the file declared.
+            unit_source: if unit.is_empty() {
+                UnitSource::Unknown
+            } else {
+                UnitSource::Declared
+            },
             sample_type,
             chunks: vec![Chunk {
                 sample_period_ns: period,
@@ -266,6 +272,7 @@ fn multi_chunk_channels_flatten_without_losing_samples() {
             id: 1,
             name: "Speed_Ref".into(),
             unit: "m/s".into(),
+            unit_source: UnitSource::Unknown,
             sample_type: SampleType::F64,
             chunks,
             sample_count: sample_base,
@@ -372,6 +379,7 @@ fn refuses_shapes_ld_cannot_represent() {
             id: 1,
             name: "Mixed".into(),
             unit: "".into(),
+            unit_source: UnitSource::Unknown,
             sample_type: SampleType::F64,
             chunks: vec![
                 Chunk {
@@ -405,6 +413,7 @@ fn refuses_shapes_ld_cannot_represent() {
             id: 1,
             name: "Gapped".into(),
             unit: "".into(),
+            unit_source: UnitSource::Unknown,
             sample_type: SampleType::F64,
             chunks: vec![
                 Chunk {
@@ -438,6 +447,7 @@ fn refuses_shapes_ld_cannot_represent() {
             id: 1,
             name: "Odd".into(),
             unit: "".into(),
+            unit_source: UnitSource::Unknown,
             sample_type: SampleType::F64,
             chunks: vec![Chunk {
                 sample_period_ns: 3_333_333,
@@ -464,6 +474,7 @@ fn empty_sources_are_rejected() {
             id: 1,
             name: "Nothing".into(),
             unit: "".into(),
+            unit_source: UnitSource::Unknown,
             sample_type: SampleType::F64,
             chunks: Vec::new(),
             sample_count: 0,

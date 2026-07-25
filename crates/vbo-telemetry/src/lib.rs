@@ -1,4 +1,4 @@
-use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource};
+use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource, UnitSource};
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
@@ -213,20 +213,30 @@ impl VboFile {
                 }
             });
             let custom_unit_index = index.saturating_sub(BUILTIN_NAMES.len().saturating_sub(1));
-            let unit = if index < BUILTIN_NAMES.len() {
-                builtin_unit(&short_names[index]).to_owned()
+            // Builtin VBOX columns have units fixed by the format spec; the
+            // trailing custom columns declare theirs in [channel units].
+            let (unit, unit_source) = if index < BUILTIN_NAMES.len() {
+                let builtin = builtin_unit(&short_names[index]);
+                if builtin.is_empty() {
+                    (String::new(), UnitSource::Unknown)
+                } else {
+                    (builtin.to_owned(), UnitSource::SpecDefault)
+                }
             } else {
-                parsed
+                match parsed
                     .units
                     .get(custom_unit_index)
-                    .filter(|unit| unit.as_str() != "(null)")
-                    .cloned()
-                    .unwrap_or_default()
+                    .filter(|unit| unit.as_str() != "(null)" && !unit.is_empty())
+                {
+                    Some(declared) => (declared.clone(), UnitSource::Declared),
+                    None => (String::new(), UnitSource::Unknown),
+                }
             };
             channels.push(Channel {
                 id: index as u32,
                 name,
                 unit,
+                unit_source,
                 sample_type: SampleType::F64,
                 chunks: vec![Chunk {
                     sample_period_ns: sample_period,

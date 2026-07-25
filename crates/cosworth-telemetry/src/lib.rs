@@ -7,7 +7,10 @@ use std::fs::File;
 use std::path::Path;
 use thiserror::Error;
 
-use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource};
+pub mod units;
+
+use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource, UnitSource};
+use units::DefLayout;
 
 pub const TICK_NS: u64 = 100;
 const MARKER: u64 = 0x7c72;
@@ -69,6 +72,7 @@ struct ChannelDef {
     id: u32,
     name: String,
     unit: String,
+    unit_source: UnitSource,
     sample_type: SampleType,
 }
 
@@ -118,29 +122,6 @@ fn utf16le(data: &[u8], offset: usize, max_bytes: usize) -> String {
         pos += 2;
     }
     String::from_utf16_lossy(&units).trim().to_owned()
-}
-
-fn infer_unit(name: &str) -> String {
-    let n = name.to_ascii_lowercase();
-    if n.contains("speed") || n.contains("vel") {
-        "m/s".into()
-    } else if n.contains("steer") {
-        "deg".into()
-    } else if n.contains("accel") {
-        "g".into()
-    } else if n.contains("damper") {
-        "mm".into()
-    } else if (n.contains("brake") && n.contains("press"))
-        || n.contains("p_f_brake")
-        || n.contains("p_r_brake")
-        || n.contains("p_tyre")
-        || n.contains("tire") && n.contains("press")
-        || n.contains("tyre") && n.contains("press")
-    {
-        "pa".into()
-    } else {
-        String::new()
-    }
 }
 
 fn read_entries_at(data: &[u8], start: usize) -> Vec<DirEntry> {
@@ -247,30 +228,39 @@ fn marker_defs(data: &[u8], layout: Layout) -> Vec<ChannelDef> {
         return Vec::new();
     }
 
-    let mut defs = Vec::new();
+    // Pass 1: collect the raw records so the unit field offsets can be
+    // detected from the file itself rather than assumed. Record layouts vary
+    // between logger firmware and Toolbox versions.
+    let mut raw: Vec<(u32, String, &[u8])> = Vec::new();
     let mut pos = first;
     while pos + 0xdc <= layout.chunk_offset.min(data.len()) {
         if u64le(data, pos) == Some(MARKER) {
             let id = u32le(data, pos + 8).unwrap_or(0);
             let name = utf16le(data, pos + 0x10, 112);
             if id != 0 && !name.is_empty() {
-                let raw_unit = utf16le(data, pos + 0x98, 32);
-                let unit = if raw_unit.is_empty() {
-                    infer_unit(&name)
-                } else {
-                    raw_unit
-                };
-                defs.push(ChannelDef {
-                    id,
-                    name,
-                    unit,
-                    sample_type: SampleType::from_pds_code(u32le(data, pos + 0xd8).unwrap_or(6)),
-                });
+                let end = (pos + record_size).min(data.len());
+                raw.push((id, name, &data[pos..end]));
             }
         }
         pos += record_size;
     }
-    defs
+
+    // Pass 2: locate the quantity/unit fields, then resolve each channel.
+    let records: Vec<&[u8]> = raw.iter().map(|(_, _, record)| *record).collect();
+    let def_layout = DefLayout::detect(&records, 0x10);
+
+    raw.iter()
+        .map(|(id, name, record)| {
+            let (unit, unit_source) = def_layout.resolve(record);
+            ChannelDef {
+                id: *id,
+                name: name.clone(),
+                unit,
+                unit_source,
+                sample_type: SampleType::from_pds_code(u32le(record, 0xd8).unwrap_or(6)),
+            }
+        })
+        .collect()
 }
 
 fn markerless_defs(data: &[u8], layout: Layout, is_export: bool) -> Vec<ChannelDef> {
@@ -282,7 +272,8 @@ fn markerless_defs(data: &[u8], layout: Layout, is_export: bool) -> Vec<ChannelD
     if !(100..=1024).contains(&record_size) {
         return Vec::new();
     }
-    let mut defs = Vec::new();
+    // Pass 1: gather records so unit field offsets can be detected per file.
+    let mut raw: Vec<(u32, String, &[u8])> = Vec::new();
     for i in 0..layout.defs_count {
         let pos = layout.defs_offset + i * record_size;
         if pos + 16 > data.len() {
@@ -293,31 +284,35 @@ fn markerless_defs(data: &[u8], layout: Layout, is_export: bool) -> Vec<ChannelD
         if name.is_empty() {
             continue;
         }
-        let raw_unit = if record_size >= 0xb8 {
-            utf16le(data, pos + 0x98, 32)
-        } else {
-            String::new()
-        };
-        let unit = if raw_unit.is_empty() {
-            infer_unit(&name)
-        } else {
-            raw_unit
-        };
-        let code = if !is_export && record_size >= 0xd4 {
-            u32le(data, pos + 0xd0)
-                .filter(|v| (1..=7).contains(v))
-                .unwrap_or(7)
-        } else {
-            7
-        };
-        defs.push(ChannelDef {
-            id,
-            name,
-            unit,
-            sample_type: SampleType::from_pds_code(code),
-        });
+        let end = (pos + record_size).min(data.len());
+        raw.push((id, name, &data[pos..end]));
     }
-    defs
+
+    // Pass 2: detect where the quantity code and unit string live, then
+    // resolve. This is what lets Toolbox exports (no unit strings) still get
+    // correct SI units from the quantity code alone.
+    let records: Vec<&[u8]> = raw.iter().map(|(_, _, record)| *record).collect();
+    let def_layout = DefLayout::detect(&records, 8);
+
+    raw.iter()
+        .map(|(id, name, record)| {
+            let (unit, unit_source) = def_layout.resolve(record);
+            let code = if !is_export && record_size >= 0xd4 {
+                u32le(record, 0xd0)
+                    .filter(|v| (1..=7).contains(v))
+                    .unwrap_or(7)
+            } else {
+                7
+            };
+            ChannelDef {
+                id: *id,
+                name: name.clone(),
+                unit,
+                unit_source,
+                sample_type: SampleType::from_pds_code(code),
+            }
+        })
+        .collect()
 }
 
 fn parse_chunks(data: &[u8], layout: Layout, is_export: bool) -> Vec<RawChunk> {
@@ -479,6 +474,7 @@ impl CosworthFile {
                 id: def.id,
                 name: def.name,
                 unit: def.unit,
+                unit_source: def.unit_source,
                 sample_type: def.sample_type,
                 chunks,
                 sample_count: sample_base,

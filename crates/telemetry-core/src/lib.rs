@@ -72,11 +72,41 @@ pub struct Chunk {
     pub time_base_ns: u64,
 }
 
+/// Where a channel's unit string came from.
+///
+/// Units drive downstream conversion and display, so a guess must never be
+/// indistinguishable from a value the file actually declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnitSource {
+    /// The file stored an explicit unit string for this channel.
+    Declared,
+    /// The unit is fixed by the file format's specification for this channel
+    /// (for example Pi/Cosworth PDS storing SI base units, or a VBOX builtin
+    /// column that is always km/h).
+    SpecDefault,
+    /// No unit information is available. `unit` is empty.
+    #[default]
+    Unknown,
+}
+
+impl UnitSource {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::SpecDefault => "spec_default",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Channel {
     pub id: u32,
     pub name: String,
     pub unit: String,
+    /// Provenance of `unit`. Never infer a unit from a channel name and report
+    /// it as [`UnitSource::Declared`].
+    pub unit_source: UnitSource,
     pub sample_type: SampleType,
     pub chunks: Vec<Chunk>,
     pub sample_count: u64,
@@ -184,6 +214,7 @@ mod tests {
             id: 1,
             name: name.into(),
             unit: String::new(),
+            unit_source: UnitSource::Unknown,
             sample_type,
             chunks: Vec::new(),
             sample_count: 0,
@@ -217,6 +248,7 @@ mod tests {
                 id: 1,
                 name: "Speed".into(),
                 unit: String::new(),
+                unit_source: UnitSource::Unknown,
                 sample_type,
                 chunks: vec![Chunk {
                     sample_period_ns: 1_000_000_000,
