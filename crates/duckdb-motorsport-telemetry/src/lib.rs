@@ -9,7 +9,7 @@ use duckdb_loadable_macros::duckdb_entrypoint_c_api;
 use glob::glob;
 #[cfg(target_os = "emscripten")]
 use libduckdb_sys as ffi;
-use motec_telemetry::MotecFile;
+use motec_telemetry::{write_motec_bytes, MotecFile, MotecMetadata};
 use motorsport_telemetry_core::SourceRef;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -963,6 +963,152 @@ impl VTab for WideVTab {
     }
 }
 
+// ── write_telemetry: export a source to a telemetry file ───────────
+//
+// Counterpart to `read_telemetry`. Only MoTeC LD output is supported today;
+// the `format` argument exists so PDS/VBO writers can slot in without a
+// breaking signature change.
+
+struct WriteBind {
+    files: Vec<InputFile>,
+    output: String,
+    metadata: MotecMetadata,
+}
+
+struct WriteInit {
+    done: AtomicUsize,
+}
+
+struct WriteVTab;
+
+impl VTab for WriteVTab {
+    type BindData = WriteBind;
+    type InitData = WriteInit;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        let pattern = bind.get_parameter(0).to_string();
+        let output = bind.get_parameter(1).to_string();
+
+        // Default to the output file's extension, then fall back to motec.
+        let requested = named_string(bind, "format").unwrap_or_else(|| {
+            match Path::new(&output)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "pds" => "pds".into(),
+                "vbo" => "vbo".into(),
+                _ => "motec".into(),
+            }
+        });
+        let format = requested.to_ascii_lowercase();
+        if format != "motec" && format != "ld" {
+            return Err(format!(
+                "write_telemetry currently supports format 'motec' only, got '{requested}'"
+            )
+            .into());
+        }
+
+        let files = open_paths(bind, &pattern, None, None, None)?;
+        if files.len() != 1 {
+            return Err(format!(
+                "write_telemetry writes one file at a time but {} matched {pattern}",
+                files.len()
+            )
+            .into());
+        }
+        for (name, logical) in [
+            ("source", LogicalTypeId::Varchar),
+            ("output", LogicalTypeId::Varchar),
+            ("format", LogicalTypeId::Varchar),
+            ("channels", LogicalTypeId::UBigint),
+            ("samples", LogicalTypeId::UBigint),
+            ("bytes", LogicalTypeId::UBigint),
+        ] {
+            bind.add_result_column(name, ty(logical));
+        }
+        bind.set_cardinality(1, true);
+        let metadata = MotecMetadata {
+            driver: named_string(bind, "driver").unwrap_or_default(),
+            vehicle: named_string(bind, "vehicle").unwrap_or_default(),
+            venue: named_string(bind, "venue").unwrap_or_default(),
+            event: named_string(bind, "event").unwrap_or_default(),
+            session: named_string(bind, "session").unwrap_or_default(),
+            short_comment: named_string(bind, "comment").unwrap_or_default(),
+            date: named_string(bind, "date").unwrap_or_default(),
+            time: named_string(bind, "time").unwrap_or_default(),
+            ..Default::default()
+        };
+        Ok(WriteBind {
+            files,
+            output,
+            metadata,
+        })
+    }
+
+    fn init(_init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        Ok(WriteInit {
+            done: AtomicUsize::new(0),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        let state = func.get_init_data();
+        // Writing has a side effect, so run it exactly once.
+        if state.done.fetch_add(1, Ordering::SeqCst) != 0 {
+            output.set_len(0);
+            return Ok(());
+        }
+        let bind = func.get_bind_data();
+        let source = &bind.files[0];
+        let bytes = write_motec_bytes(source.source.as_ref(), &bind.metadata)?;
+        std::fs::write(&bind.output, &bytes)?;
+
+        let channels = source
+            .channels()
+            .iter()
+            .filter(|channel| channel.sample_count > 0)
+            .count() as u64;
+        let samples = source
+            .channels()
+            .iter()
+            .map(|channel| channel.sample_count)
+            .sum::<u64>();
+
+        output.flat_vector(0).insert(0, source.path());
+        output.flat_vector(1).insert(0, bind.output.as_str());
+        output.flat_vector(2).insert(0, "motec");
+        output.flat_vector(3).typed_slice::<u64>()[0] = channels;
+        output.flat_vector(4).typed_slice::<u64>()[0] = samples;
+        output.flat_vector(5).typed_slice::<u64>()[0] = bytes.len() as u64;
+        output.set_len(1);
+        Ok(())
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        Some(vec![ty(LogicalTypeId::Varchar), ty(LogicalTypeId::Varchar)])
+    }
+
+    fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+        Some(vec![
+            ("format".into(), ty(LogicalTypeId::Varchar)),
+            ("driver".into(), ty(LogicalTypeId::Varchar)),
+            ("vehicle".into(), ty(LogicalTypeId::Varchar)),
+            ("venue".into(), ty(LogicalTypeId::Varchar)),
+            ("event".into(), ty(LogicalTypeId::Varchar)),
+            ("session".into(), ty(LogicalTypeId::Varchar)),
+            ("comment".into(), ty(LogicalTypeId::Varchar)),
+            ("date".into(), ty(LogicalTypeId::Varchar)),
+            ("time".into(), ty(LogicalTypeId::Varchar)),
+        ])
+    }
+}
+
 #[cfg_attr(
     not(target_os = "emscripten"),
     duckdb_entrypoint_c_api(ext_name = "motorsport_telemetry", min_duckdb_version = "v1.2.0")
@@ -996,5 +1142,6 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
             format: Some("vbo"),
         },
     )?;
+    con.register_table_function::<WriteVTab>("write_telemetry")?;
     Ok(())
 }

@@ -8,9 +8,12 @@ use std::path::Path;
 use thiserror::Error;
 
 const MAGIC: u32 = 0x40;
-const CHANNEL_META_SIZE: usize = 124;
+pub(crate) const CHANNEL_META_SIZE: usize = 124;
 const MIN_FILE_SIZE: usize = 0x1a0;
 const MAX_CHANNELS: usize = 4096;
+
+pub mod write;
+pub use write::{write_motec, write_motec_bytes, MotecMetadata, MotecWriteError};
 
 #[derive(Debug, Error)]
 pub enum MotecError {
@@ -95,26 +98,6 @@ fn text(data: &[u8], offset: usize, length: usize) -> String {
         .trim()
         .to_owned()
 }
-fn unit_text(data: &[u8], offset: usize, length: usize) -> String {
-    let bytes = data
-        .get(offset..offset.saturating_add(length).min(data.len()))
-        .unwrap_or_default();
-    let segments = bytes
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            part.iter()
-                .map(|&byte| char::from(byte))
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    segments
-        .iter()
-        .find(|segment| segment.contains('/') || segment.len() <= 4)
-        .or_else(|| segments.last())
-        .map(|value| value.trim().to_owned())
-        .unwrap_or_default()
-}
 
 impl MotecFile {
     #[cfg(not(target_os = "emscripten"))]
@@ -170,8 +153,11 @@ impl MotecFile {
                 decimal_places: i16le(&data, address + 0x1e).unwrap_or(0),
             };
             let name = text(&data, address + 0x20, 32);
-            let unit = unit_text(&data, address + 0x40, 12);
-            let valid_width = matches!(width, 2 | 4);
+            // Per the LD layout the 124-byte channel block holds name at 0x20
+            // (32 bytes), short name at 0x40 (8 bytes) and unit at 0x48 (12
+            // bytes).
+            let unit = text(&data, address + 0x48, 12);
+            let valid_width = matches!(width, 2 | 4 | 8);
             let count = if valid_width && data_ptr < data.len() as u64 {
                 requested_count.min((data.len() as u64 - data_ptr) / width as u64)
             } else {
@@ -189,10 +175,13 @@ impl MotecFile {
             } else {
                 Vec::new()
             };
-            let sample_type = match (datatype_a == 0x07, width) {
-                (true, _) => SampleType::F32,
-                (false, 2) => SampleType::I16,
-                (false, 4) => SampleType::I32,
+            let sample_type = match (datatype_a, width) {
+                // 0x08/8 is MoTeC's little-endian f64 (seen on GPS channels).
+                (0x08, 8) => SampleType::F64,
+                (0x07, 8) => SampleType::F64,
+                (0x07, _) => SampleType::F32,
+                (_, 2) => SampleType::I16,
+                (_, 4) => SampleType::I32,
                 _ => SampleType::F32,
             };
             channels.push(Channel {
@@ -242,11 +231,16 @@ impl TelemetrySource for MotecFile {
         let channel = &self.channels[channel_index];
         let encoding = &self.encodings[channel_index];
         let offset = channel.chunks[0].data_ptr as usize + local_index as usize * encoding.width;
+        // Float channels carry raw IEEE values; the scale/shift/mul transform
+        // applies to the integer encodings only.
+        if encoding.datatype_a == 0x08 && encoding.width == 8 {
+            return f64::from_le_bytes(self.data[offset..offset + 8].try_into().unwrap());
+        }
         if encoding.datatype_a == 0x07 {
-            return if encoding.width == 4 {
-                f32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap()) as f64
-            } else {
-                0.0
+            return match encoding.width {
+                8 => f64::from_le_bytes(self.data[offset..offset + 8].try_into().unwrap()),
+                4 => f32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap()) as f64,
+                _ => 0.0,
             };
         }
         let raw = match encoding.width {
@@ -298,7 +292,7 @@ mod tests {
         u16_at(&mut data, speed + 0x14, 4);
         u16_at(&mut data, speed + 0x16, 2);
         data[speed + 0x20..speed + 0x25].copy_from_slice(b"Speed");
-        data[speed + 0x40..speed + 0x43].copy_from_slice(b"m/s");
+        data[speed + 0x48..speed + 0x4b].copy_from_slice(b"m/s");
         for (index, value) in [1.0_f32, 2.0, 3.0].into_iter().enumerate() {
             data[0x380 + index * 4..0x384 + index * 4].copy_from_slice(&value.to_le_bytes());
         }
@@ -311,7 +305,7 @@ mod tests {
         i16_at(&mut data, brake + 0x1c, 1);
         i16_at(&mut data, brake + 0x1e, 1);
         data[brake + 0x20..brake + 0x29].copy_from_slice(b"P_F_BRAKE");
-        data[brake + 0x40..brake + 0x43].copy_from_slice(b"bar");
+        data[brake + 0x48..brake + 0x4b].copy_from_slice(b"bar");
         i16_at(&mut data, 0x3a0, 423);
         i16_at(&mut data, 0x3a2, -10);
         let mut file = tempfile::NamedTempFile::new().unwrap();
