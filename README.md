@@ -101,6 +101,7 @@ One row per channel definition:
 | `format` | `pds`, `motec`, or `vbo` |
 | `channel_id` | File-local channel identifier |
 | `name`, `unit` | Original channel metadata |
+| `unit_source` | Where `unit` came from: `declared`, `spec_default`, or `unknown` |
 | `type_code`, `data_type` | Stored representation |
 | `frequency_hz`, `sample_period_ns` | Native clock |
 | `sample_count`, `chunk_count`, `duration_ns` | Physical storage summary |
@@ -223,6 +224,139 @@ GROUP BY filename, create_date, modified_at;
 ```
 
 A plain `WHERE create_date ...` remains logically correct but is applied after scanning because DuckDB 1.4's public C table-function API does not expose arbitrary filter expressions to extensions. Use `create_date_from`/`create_date_to` when physical pushdown matters.
+
+## Units
+
+Channels report the units the file actually specifies. Nothing is guessed from channel names, and `unit_source` tells you where each unit came from:
+
+| `unit_source` | Meaning |
+|---|---|
+| `declared` | The file stored an explicit unit string for this channel |
+| `spec_default` | The unit is fixed by the format's specification |
+| `unknown` | No unit information exists; `unit` is empty |
+
+```sql
+SELECT name, unit, unit_source
+FROM telemetry_metadata('run.pds')
+WHERE name IN ('Speed_Ref', 'STEER', 'P_F_BRAKE', 'gear');
+```
+
+```text
+┌───────────┬───────┬──────────────┐
+│ Speed_Ref │ m/s   │ spec_default │
+│ STEER     │ rad   │ spec_default │
+│ P_F_BRAKE │ Pa    │ spec_default │
+│ gear      │       │ unknown      │
+└───────────┴───────┴──────────────┘
+```
+
+**Cosworth/Pi PDS files store SI base units.** Speeds are m/s, angles and GPS coordinates are radians, pressures are Pa, temperatures are K, lengths are m, and accelerations are m/s². Engine speed is rad/s, not RPM. This is the convention Cosworth documents for Pi Toolbox, and PDS channel definitions carry a quantity code naming each channel's physical dimension, so units come from the file even in Pi Toolbox exports that strip the human-readable unit string.
+
+Expect raw values to look unfamiliar as a result: a 269 km/h top speed reads `74.75`, a 75 bar brake pressure reads `7515500`, and 3 g of braking reads `-29.8`. Convert in SQL when you want other units:
+
+```sql
+SELECT max("Speed_Ref") * 3.6              AS top_speed_kmh,
+       max("P_F_BRAKE") / 100000           AS brake_max_bar,
+       min("I_ACCEL_LONG") / 9.80665       AS braking_g,
+       degrees(min("STEER"))               AS steer_min_deg
+FROM read_cosworth('run.pds');
+```
+
+If you convert the same channels repeatedly, see [Channel maps](#channel-maps-advanced) for a reusable way to do it.
+
+Channels with `unit_source = 'unknown'` are genuinely unitless — counters, gear positions, lap numbers, flags, and ratios. A few files declare marker text such as `raw`, `flag`, or `pp1`; these are reported as `spec_default` because they label a channel without naming a convertible dimension.
+
+## Writing MoTeC files
+
+`write_telemetry(source, output)` converts any supported input to a MoTeC LD file:
+
+```sql
+SELECT * FROM write_telemetry('run.pds', 'run.ld');
+```
+
+```text
+┌─────────┬────────┬─────────┬──────────┬─────────┬──────────┐
+│ source  │ output │ format  │ channels │ samples │  bytes   │
+├─────────┼────────┼─────────┼──────────┼─────────┼──────────┤
+│ run.pds │ run.ld │ motec   │       31 │ 1716105 │ 13736960 │
+└─────────┴────────┴─────────┴──────────┴─────────┴──────────┘
+```
+
+The writer is lossless or it refuses. Sample values keep their full precision — float64 channels are written as float64, and `u16`/`u32` widen rather than truncate — so a PDS round-trips through LD bit-for-bit. Rather than silently degrading a recording, it returns an error when a file cannot be represented: mixed sample rates in one output, non-contiguous chunks, non-integer frequencies, or channel names and units too long for LD's fixed-width fields.
+
+Optional metadata named arguments: `driver`, `vehicle`, `venue`, `event`, `session`, `comment`, `date`, `time`.
+
+```sql
+SELECT * FROM write_telemetry('run.pds', 'run.ld',
+    driver := 'Tobi', vehicle := 'ORECA 07', venue := 'Sebring');
+```
+
+## Channel maps (advanced)
+
+Everything above returns exactly what the file contains. A **channel map** is an opt-in layer that renames channels and converts their units — useful when you repeatedly load Cosworth SI data into a tool that expects km/h and degrees, or when you want one consistent schema across cars that name the same signal differently.
+
+Skip this section unless you need it. Without `channel_map`, readers pass data through untouched.
+
+Rules are one per line:
+
+```text
+source_channel -> target_name [unit] *scale +offset
+```
+
+Only the source channel is required; conversion is `value * scale + offset`.
+
+```sql
+SELECT * FROM read_cosworth('run.pds', rate := 20, channel_map := '
+    Speed_Ref    -> Ground Speed  [km/h] *3.6
+    STEER        -> Steered Angle [deg]  *57.29577951308232
+    P_F_BRAKE    -> Brake Press   [bar]  *0.00001
+    I_ACCEL_LONG -> G Force Long  [g]    *0.10197162129779283
+    ACT          -> Air Temp      [C]    +-273.15
+');
+```
+
+Keep a team's mapping in version control and pass the path instead:
+
+```sql
+SELECT * FROM read_cosworth('run.pds', channel_map := 'maps/oreca07.map');
+```
+
+`channel_map` works on `read_telemetry` (and the per-format readers), `telemetry_samples`, `telemetry_metadata`, and `telemetry_column_comments`. Units supplied by a map are reported as `declared`, since you stated them explicitly. Unmapped channels keep their original names, units, and values.
+
+Mistakes fail at bind time rather than silently doing nothing:
+
+```sql
+SELECT * FROM read_cosworth('run.pds', channel_map := 'Speed_Reff -> Speed *3.6');
+-- Binder Error: channel_map references channel(s) not present in the data: Speed_Reff
+```
+
+Mapping is deliberately explicit rather than automatic because files disagree in ways no heuristic can resolve. In one ORECA 07 export `gear` reads 1–6 while `gear_pos` reads 2–7 for the same physical gear, and the `FIA_Gps*` channels exist but are flat zero — an automatic mapper would have to guess, and would sometimes produce a plausible-looking but wrong trace.
+
+### Persisting units as column comments
+
+DuckDB cannot attach comments to a table function's result columns, so unit metadata has to be applied to a materialised table. `telemetry_column_comments(file, table)` generates the statements:
+
+```sql
+SELECT column_name, unit, ddl
+FROM telemetry_column_comments('run.pds', 'laps');
+```
+
+```text
+┌───────────┬──────┬────────────────────────────────────────────────────────────┐
+│ Speed_Ref │ m/s  │ COMMENT ON COLUMN "laps"."Speed_Ref" IS 'unit=m/s; sour...  │
+└───────────┴──────┴────────────────────────────────────────────────────────────┘
+```
+
+Create the table, run the generated DDL, and units travel with the table:
+
+```sql
+CREATE TABLE laps AS SELECT * FROM read_cosworth('run.pds', rate := 20);
+-- execute each statement from telemetry_column_comments('run.pds', 'laps')
+SELECT column_name, comment FROM duckdb_columns() WHERE table_name = 'laps';
+```
+
+`tests/unit_metadata_demo.sh` runs this end to end, including with a channel map.
+
 
 ## Recursive and mixed-format globs
 

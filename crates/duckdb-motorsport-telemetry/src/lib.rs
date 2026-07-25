@@ -1,4 +1,5 @@
 pub mod channel_map;
+mod unit_sql;
 
 use channel_map::ChannelMap;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
@@ -26,11 +27,11 @@ use std::sync::{
 };
 use vbo_telemetry::VboFile;
 
-const VECTOR_SIZE: u64 = 2048;
+pub(crate) const VECTOR_SIZE: u64 = 2048;
 const SAMPLES_COLUMN_COUNT: u64 = 10;
-const CHANNELS_COLUMN_COUNT: u64 = 13;
+const CHANNELS_COLUMN_COUNT: u64 = 15;
 
-trait FlatVectorExt {
+pub(crate) trait FlatVectorExt {
     fn typed_slice<T>(&mut self) -> &mut [T];
 }
 impl FlatVectorExt for FlatVector<'_> {
@@ -39,7 +40,7 @@ impl FlatVectorExt for FlatVector<'_> {
     }
 }
 
-fn ty(id: LogicalTypeId) -> LogicalTypeHandle {
+pub(crate) fn ty(id: LogicalTypeId) -> LogicalTypeHandle {
     LogicalTypeHandle::from(id)
 }
 fn named_string(bind: &BindInfo, name: &str) -> Option<String> {
@@ -649,6 +650,8 @@ impl VTab for ChannelsVTab {
             // so queries can tell a unit the file stated from one implied by
             // the format spec, and skip channels with no unit at all.
             ("unit_source", LogicalTypeId::Varchar),
+            ("canonical_unit", LogicalTypeId::Varchar),
+            ("dimension", LogicalTypeId::Varchar),
             ("type_code", LogicalTypeId::UInteger),
             ("data_type", LogicalTypeId::Varchar),
             ("frequency_hz", LogicalTypeId::Double),
@@ -717,25 +720,46 @@ impl VTab for ChannelsVTab {
                                 .unit_for(&channel.name, &channel.unit, channel.unit_source);
                         vector.insert(row, source.name())
                     }
-                    6 => vector.typed_slice::<u32>()[row] = channel.sample_type.code(),
-                    7 => vector.insert(row, channel.sample_type.name()),
-                    8 => {
+                    // Registry view of the unit: canonical spelling and physical
+                    // dimension. NULL when the unit is absent or unrecognised,
+                    // so an unknown unit reads as unknown rather than guessed.
+                    6 => {
+                        let (unit, _) =
+                            bind.map
+                                .unit_for(&channel.name, &channel.unit, channel.unit_source);
+                        match motorsport_telemetry_core::units::normalize(&unit) {
+                            Some(canonical) => vector.insert(row, canonical),
+                            None => vector.set_null(row),
+                        }
+                    }
+                    7 => {
+                        let (unit, _) =
+                            bind.map
+                                .unit_for(&channel.name, &channel.unit, channel.unit_source);
+                        match motorsport_telemetry_core::units::lookup(&unit) {
+                            Some(def) => vector.insert(row, def.dimension.name()),
+                            None => vector.set_null(row),
+                        }
+                    }
+                    8 => vector.typed_slice::<u32>()[row] = channel.sample_type.code(),
+                    9 => vector.insert(row, channel.sample_type.name()),
+                    10 => {
                         if let Some(value) = channel.frequency_hz() {
                             vector.typed_slice::<f64>()[row] = value
                         } else {
                             vector.set_null(row)
                         }
                     }
-                    9 => {
+                    11 => {
                         if let Some(period) = channel.first_period_ns() {
                             vector.typed_slice::<u64>()[row] = period
                         } else {
                             vector.set_null(row)
                         }
                     }
-                    10 => vector.typed_slice::<u64>()[row] = channel.sample_count,
-                    11 => vector.typed_slice::<u64>()[row] = channel.chunks.len() as u64,
-                    12 => vector.typed_slice::<u64>()[row] = channel.duration_ns,
+                    12 => vector.typed_slice::<u64>()[row] = channel.sample_count,
+                    13 => vector.typed_slice::<u64>()[row] = channel.chunks.len() as u64,
+                    14 => vector.typed_slice::<u64>()[row] = channel.duration_ns,
                     _ => vector.typed_slice::<i64>()[row] = (start + row) as i64,
                 }
             }
@@ -1375,5 +1399,8 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     )?;
     con.register_table_function::<WriteVTab>("write_telemetry")?;
     con.register_table_function::<CommentsVTab>("telemetry_column_comments")?;
+    con.register_table_function::<unit_sql::UnitsVTab>("telemetry_units")?;
+    con.register_scalar_function::<unit_sql::ConvertScalar>("telemetry_convert")?;
+    con.register_scalar_function::<unit_sql::CanConvertScalar>("telemetry_can_convert")?;
     Ok(())
 }

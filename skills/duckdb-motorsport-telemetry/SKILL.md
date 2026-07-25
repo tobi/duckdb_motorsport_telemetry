@@ -26,12 +26,13 @@ For a manually downloaded release artifact, use `INSTALL '/absolute/path/motorsp
 1. Discover exact names, units, rates, and whether channels actually have samples:
 
 ```sql
-SELECT format, name, unit, frequency_hz, sample_count
+SELECT format, name, unit, unit_source, frequency_hz, sample_count
 FROM telemetry_metadata('run.pds')
 ORDER BY name;
 ```
 
-A definition with `sample_count = 0` is not recorded data.
+A definition with `sample_count = 0` is not recorded data. Always read
+`unit_source` alongside `unit`; see Units below, and note PDS values are SI.
 
 2. Use `telemetry_samples` when exact native values or mixed rates matter:
 
@@ -101,14 +102,91 @@ Quote globs in shell commands. Unknown extensions from broad globs are ignored; 
 
 ## Units
 
-Values and units are source-exact. Do not silently combine:
+Values and units are source-exact. Units come from the file, never guessed from
+channel names. Check `unit_source` before trusting or converting a unit:
 
-- m/s and km/h
-- Pa and bar
-- ratio and percent
-- m/s² and g
+| `unit_source` | Meaning |
+|---|---|
+| `declared` | File stored an explicit unit string |
+| `spec_default` | Unit fixed by the format spec |
+| `unknown` | No unit info; `unit` is empty. Genuinely unitless (counters, gear, flags, ratios) |
 
-Convert explicitly, e.g. `speed_mps * 3.6`, `pressure_pa / 100000`, or `accel_mps2 / 9.80665`.
+```sql
+SELECT name, unit, unit_source FROM telemetry_metadata('run.pds');
+```
+
+**Cosworth/Pi PDS stores SI base units.** This surprises people, so check
+`unit_source` and the value range before assuming a channel is in display units:
+
+| Quantity | PDS stores | NOT |
+|---|---|---|
+| Speed | m/s (74.75 = 269 km/h) | km/h |
+| Angle, steering, GPS lat/long | rad (-2.58 = -148 deg) | deg |
+| Pressure | Pa (7515500 = 75 bar) | bar/kPa |
+| Acceleration | m/s^2 (-29.8 = -3.0 g) | g |
+| Temperature | K | C |
+| Length, damper travel | m (0.0182 = 18.2 mm) | mm |
+| Engine speed | rad/s (x9.549 -> RPM) | RPM |
+
+PDS definition records carry a quantity code naming each channel's dimension, so
+units resolve even in Pi Toolbox exports that strip the unit string. Field offsets
+are detected per file (layouts vary by firmware/Toolbox version), not hardcoded.
+
+Convert explicitly: `speed_mps * 3.6`, `pressure_pa / 100000`,
+`accel_mps2 / 9.80665`, `degrees(steer_rad)`, `kelvin - 273.15`.
+
+Do not silently combine m/s with km/h, Pa with bar, ratio with percent, or m/s^2 with g.
+
+## Writing MoTeC LD
+
+```sql
+SELECT * FROM write_telemetry('run.pds', 'run.ld');   -- returns channels/samples/bytes
+```
+
+Lossless or it errors: f64 stays f64, u16/u32 widen. Refuses (rather than degrading)
+mixed sample rates, non-contiguous chunks, non-integer frequencies, or over-long
+names/units. Optional: `driver`, `vehicle`, `venue`, `event`, `session`, `comment`,
+`date`, `time`.
+
+## Channel maps (advanced, only when asked)
+
+Readers pass data through untouched by default. Use `channel_map` only when the user
+explicitly wants renaming/unit conversion (e.g. loading Cosworth SI into a tool
+expecting km/h and deg, or unifying schemas across cars). Do not reach for it just
+because raw SI values look unfamiliar; convert in SQL instead.
+
+Rules, one per line: `source -> target_name [unit] *scale +offset` (conversion is
+`value * scale + offset`; only the source is required).
+
+```sql
+SELECT * FROM read_cosworth('run.pds', channel_map := '
+    Speed_Ref    -> Ground Speed  [km/h] *3.6
+    STEER        -> Steered Angle [deg]  *57.29577951308232
+    P_F_BRAKE    -> Brake Press   [bar]  *0.00001
+    I_ACCEL_LONG -> G Force Long  [g]    *0.10197162129779283
+    ACT          -> Air Temp      [C]    +-273.15
+');
+SELECT * FROM read_cosworth('run.pds', channel_map := 'maps/oreca07.map');  -- or a file
+```
+
+Works on `read_telemetry`/`read_cosworth`/etc, `telemetry_samples`,
+`telemetry_metadata`, `telemetry_column_comments`. Mapped units report as `declared`.
+Typos and malformed rules error at bind time. Never auto-generate a map from channel
+names: in one export `gear` reads 1-6 while `gear_pos` reads 2-7 for the same gear,
+and `FIA_Gps*` channels exist but are flat zero.
+
+### Persisting units on a table
+
+DuckDB cannot comment a table function's result columns, so materialise first:
+
+```sql
+CREATE TABLE laps AS SELECT * FROM read_cosworth('run.pds', rate := 20);
+-- then execute each statement returned by:
+SELECT ddl FROM telemetry_column_comments('run.pds', 'laps');
+SELECT column_name, comment FROM duckdb_columns() WHERE table_name = 'laps';
+```
+
+See `tests/unit_metadata_demo.sh` for the full working loop.
 
 ## Common queries
 

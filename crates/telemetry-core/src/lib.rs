@@ -1,5 +1,12 @@
 use std::sync::Arc;
 
+pub mod units;
+
+pub use units::{
+    can_convert, convert, lookup as lookup_unit, normalize as normalize_unit, ConvertError,
+    Dimension, UnitDef, UNITS,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleType {
     U8,

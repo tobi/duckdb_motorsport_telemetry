@@ -17,7 +17,7 @@ cosworth-telemetry.workspace = true
 motec-telemetry.workspace = true
 vbo-telemetry.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-duckdb = { version = "=1.10504.0", features = ["vtab-loadable", "loadable-extension"] }
+duckdb = { version = "=1.10504.0", features = ["vtab-loadable", "loadable-extension", "vscalar"] }
 duckdb-loadable-macros = "=1.10504.0"
 glob = "0.3"
 libduckdb-sys = { version = "=1.10504.0", features = ["loadable-extension"] }

@@ -209,6 +209,26 @@ impl DefLayout {
         unit: None,
     };
 
+    /// Offset of the unit string in every PDS definition record observed so far
+    /// (native MQ12Di logs and Pi Toolbox exports alike). Used only as a
+    /// tie-breaker when a unit string cannot be corroborated by a quantity code.
+    const CANONICAL_UNIT_OFFSET: usize = 0x90;
+
+    /// True when every record's u32 at `offset` decodes to a dimension we know.
+    fn codes_all_recognised(records: &[&[u8]], offset: usize) -> bool {
+        let mut recognised = 0usize;
+        let mut total = 0usize;
+        for record in records {
+            if let Some(code) = u32_field(record, offset) {
+                total += 1;
+                if !matches!(Quantity::from_code(code), Quantity::Unknown(_)) {
+                    recognised += 1;
+                }
+            }
+        }
+        total > 0 && recognised == total
+    }
+
     /// Locate the quantity-code and unit-string fields in a set of records.
     ///
     /// `records` are the raw definition records; `name_offset` is where the
@@ -324,22 +344,47 @@ impl DefLayout {
             };
         }
 
-        // No unit strings anywhere (a Toolbox export): fall back to picking a
-        // quantity offset whose codes are all ones we recognise. This is how
-        // exports still get correct units.
-        let quantity = quantity_candidates.into_iter().find(|&offset| {
-            let mut recognised = 0usize;
-            let mut total = 0usize;
-            for record in records {
-                if let Some(code) = u32_field(record, offset) {
-                    total += 1;
-                    if !matches!(Quantity::from_code(code), Quantity::Unknown(_)) {
-                        recognised += 1;
-                    }
-                }
-            }
-            total > 0 && recognised == total
-        });
+        // A declared unit string stands on its own. Pairing it with a quantity
+        // code is the strongest evidence, but a file can carry unit strings with
+        // no usable quantity field (or have too few channels for the pairing
+        // test), and in that case the string is still what the file says.
+        //
+        // Require the candidate to appear at the *canonical* offset: a real unit
+        // field is at a fixed place in the record, so accepting an arbitrary
+        // offset here would risk reading some other string as a unit.
+        if let Some(&(unit, _)) = unit_candidates
+            .iter()
+            .find(|&&(offset, _)| offset == Self::CANONICAL_UNIT_OFFSET)
+        {
+            // Still take a quantity offset if one is credible, so channels
+            // without a string can fall back to their dimension.
+            let quantity = quantity_candidates
+                .iter()
+                .copied()
+                .find(|&offset| offset != unit && Self::codes_all_recognised(records, offset));
+            return Self {
+                quantity,
+                unit: Some(unit),
+            };
+        }
+
+        // No confirmed pairing. Fall back to a quantity offset whose codes are
+        // all ones we recognise; this is how Toolbox exports (which strip the
+        // unit string) still get correct units.
+        //
+        // This requires real evidence. Several unrelated words in a definition
+        // record hold small integers, so with only a handful of channels a
+        // spurious offset can look exactly like a quantity field. Reporting
+        // `unknown` is correct when the file cannot tell us; inventing a
+        // dimension from a coincidence is the failure mode this module exists
+        // to prevent.
+        const MIN_RECORDS_FOR_FALLBACK: usize = 8;
+        if records.len() < MIN_RECORDS_FOR_FALLBACK {
+            return Self::NONE;
+        }
+        let quantity = quantity_candidates
+            .into_iter()
+            .find(|&offset| Self::codes_all_recognised(records, offset));
         Self {
             quantity,
             unit: None,
@@ -559,6 +604,28 @@ mod tests {
         let layout = DefLayout::detect(&records, 8);
         assert_eq!(layout.quantity, Some(0x30));
         assert_eq!(layout.unit, Some(0x50));
+    }
+
+    #[test]
+    fn refuses_to_guess_a_quantity_offset_from_too_few_records() {
+        // Two records is not evidence. Unrelated words in a definition record
+        // hold small integers, so a tiny file can accidentally look like it has
+        // a quantity field; reporting `unknown` beats inventing a dimension.
+        let owned: Vec<Vec<u8>> = (0..2u32)
+            .map(|seed| {
+                let mut buffer = record("Speed", 0, "");
+                buffer[0x40..0x44].copy_from_slice(&(seed + 1).to_le_bytes());
+                buffer[0x58..0x5c].copy_from_slice(&(seed + 3).to_le_bytes());
+                buffer
+            })
+            .collect();
+        let records: Vec<&[u8]> = owned.iter().map(|r| r.as_slice()).collect();
+        let layout = DefLayout::detect(&records, 8);
+        assert_eq!(layout.quantity, None);
+        assert_eq!(layout.unit, None);
+        let (unit, source) = layout.resolve(records[0]);
+        assert!(unit.is_empty(), "expected no unit, got {unit:?}");
+        assert_eq!(source, UnitSource::Unknown);
     }
 
     /// Garbage must not yield a confident layout.
