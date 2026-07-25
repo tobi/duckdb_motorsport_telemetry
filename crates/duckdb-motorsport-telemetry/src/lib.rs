@@ -1,3 +1,6 @@
+pub mod channel_map;
+
+use channel_map::ChannelMap;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use cosworth_telemetry::CosworthFile;
 use duckdb::{
@@ -10,7 +13,7 @@ use glob::glob;
 #[cfg(target_os = "emscripten")]
 use libduckdb_sys as ffi;
 use motec_telemetry::{write_motec_bytes, MotecFile, MotecMetadata};
-use motorsport_telemetry_core::SourceRef;
+use motorsport_telemetry_core::{SourceRef, UnitSource};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 #[cfg(target_os = "emscripten")]
@@ -24,8 +27,8 @@ use std::sync::{
 use vbo_telemetry::VboFile;
 
 const VECTOR_SIZE: u64 = 2048;
-const SAMPLES_COLUMN_COUNT: u64 = 9;
-const CHANNELS_COLUMN_COUNT: u64 = 12;
+const SAMPLES_COLUMN_COUNT: u64 = 10;
+const CHANNELS_COLUMN_COUNT: u64 = 13;
 
 trait FlatVectorExt {
     fn typed_slice<T>(&mut self) -> &mut [T];
@@ -47,6 +50,27 @@ fn named_i64(bind: &BindInfo, name: &str) -> Option<i64> {
 }
 fn named_bool(bind: &BindInfo, name: &str) -> Option<bool> {
     bind.get_named_parameter(name).map(|v| v.to_int64() != 0)
+}
+
+/// Read the `channel_map` named argument.
+///
+/// Accepts inline rules or a path to a rules file, so a team's mapping can
+/// live in version control instead of being pasted into every query. A value
+/// containing no `->` and naming an existing file is treated as a path.
+fn named_channel_map(bind: &BindInfo) -> Result<ChannelMap, Box<dyn Error>> {
+    let Some(value) = named_string(bind, "channel_map") else {
+        return Ok(ChannelMap::default());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(ChannelMap::default());
+    }
+    if !trimmed.contains("->") && Path::new(trimmed).is_file() {
+        let text = std::fs::read_to_string(trimmed)
+            .map_err(|error| format!("cannot read channel_map file '{trimmed}': {error}"))?;
+        return ChannelMap::parse(&text);
+    }
+    ChannelMap::parse(trimmed)
 }
 fn named_timestamp(bind: &BindInfo, name: &str) -> Result<Option<i64>, Box<dyn Error>> {
     let Some(value) = bind.get_named_parameter(name) else {
@@ -326,6 +350,8 @@ struct SamplesBind {
     channel_filter: HashSet<String>,
     start_ns: u64,
     end_ns: u64,
+    /// Opt-in renaming / unit conversion. Empty means pass through untouched.
+    map: ChannelMap,
 }
 
 #[derive(Clone, Copy)]
@@ -376,11 +402,22 @@ impl VTab for SamplesVTab {
             return Err("end_ns must be greater than or equal to start_ns".into());
         }
 
+        let map = named_channel_map(bind)?;
+        if !map.is_empty() {
+            let available: Vec<String> = files
+                .iter()
+                .flat_map(|file| file.channels())
+                .map(|channel| channel.name.clone())
+                .collect();
+            map.validate(&available)?;
+        }
+
         bind.add_result_column("file", ty(LogicalTypeId::Varchar));
         bind.add_result_column("format", ty(LogicalTypeId::Varchar));
         bind.add_result_column("channel_id", ty(LogicalTypeId::UInteger));
         bind.add_result_column("channel", ty(LogicalTypeId::Varchar));
         bind.add_result_column("unit", ty(LogicalTypeId::Varchar));
+        bind.add_result_column("unit_source", ty(LogicalTypeId::Varchar));
         bind.add_result_column("frequency_hz", ty(LogicalTypeId::Double));
         bind.add_result_column("sample_index", ty(LogicalTypeId::UBigint));
         bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
@@ -400,6 +437,7 @@ impl VTab for SamplesVTab {
             channel_filter,
             start_ns,
             end_ns,
+            map,
         })
     }
 
@@ -488,26 +526,39 @@ impl VTab for SamplesVTab {
                 2 => output.flat_vector(out_col).typed_slice::<u32>()[..n].fill(channel.id),
                 3 => {
                     let vector = output.flat_vector(out_col);
+                    let name = bind.map.name_for(&channel.name);
                     for row in 0..n {
-                        vector.insert(row, channel.name.as_str());
+                        vector.insert(row, name);
                     }
                 }
                 4 => {
                     let vector = output.flat_vector(out_col);
+                    let (unit, _) =
+                        bind.map
+                            .unit_for(&channel.name, &channel.unit, channel.unit_source);
                     for row in 0..n {
-                        vector.insert(row, channel.unit.as_str());
+                        vector.insert(row, unit.as_str());
                     }
                 }
-                5 => output.flat_vector(out_col).typed_slice::<f64>()[..n]
+                5 => {
+                    let vector = output.flat_vector(out_col);
+                    let (_, source) =
+                        bind.map
+                            .unit_for(&channel.name, &channel.unit, channel.unit_source);
+                    for row in 0..n {
+                        vector.insert(row, source.name());
+                    }
+                }
+                6 => output.flat_vector(out_col).typed_slice::<f64>()[..n]
                     .fill(1e9 / chunk.sample_period_ns as f64),
-                6 => {
+                7 => {
                     let mut vector = output.flat_vector(out_col);
                     let dst = &mut vector.typed_slice::<u64>()[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
                         *value = chunk.sample_base + segment.local_start + row as u64;
                     }
                 }
-                7 => {
+                8 => {
                     let mut vector = output.flat_vector(out_col);
                     let dst = &mut vector.typed_slice::<i64>()[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
@@ -518,15 +569,22 @@ impl VTab for SamplesVTab {
                         ) as i64;
                     }
                 }
-                8 => {
+                9 => {
                     let mut vector = output.flat_vector(out_col);
+                    let rule = bind.map.rule_for(&channel.name);
                     let dst = &mut vector.typed_slice::<f64>()[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
-                        *value = file.decode(
+                        let raw = file.decode(
                             segment.channel,
                             segment.chunk,
                             segment.local_start + row as u64,
                         );
+                        // Only mapped channels are converted; everything else
+                        // passes through byte-for-byte as decoded.
+                        *value = match rule {
+                            Some(rule) => rule.convert(raw),
+                            None => raw,
+                        };
                     }
                 }
                 _ => output.flat_vector(out_col).typed_slice::<i64>()[..n].fill(index as i64),
@@ -547,6 +605,8 @@ impl VTab for SamplesVTab {
             ("channel".into(), ty(LogicalTypeId::Varchar)),
             ("start_ns".into(), ty(LogicalTypeId::Bigint)),
             ("end_ns".into(), ty(LogicalTypeId::Bigint)),
+            // Inline rules or a path to a rules file.
+            ("channel_map".into(), ty(LogicalTypeId::Varchar)),
         ])
     }
 }
@@ -555,6 +615,7 @@ impl VTab for SamplesVTab {
 
 struct ChannelsBind {
     files: Vec<InputFile>,
+    map: ChannelMap,
     rows: Vec<(usize, usize)>,
 }
 struct ChannelsInit {
@@ -569,12 +630,25 @@ impl VTab for ChannelsVTab {
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
         let files = open_paths(bind, &bind.get_parameter(0).to_string(), None, None, None)?;
+        let map = named_channel_map(bind)?;
+        if !map.is_empty() {
+            let available: Vec<String> = files
+                .iter()
+                .flat_map(|file| file.channels())
+                .map(|channel| channel.name.clone())
+                .collect();
+            map.validate(&available)?;
+        }
         for (name, logical) in [
             ("file", LogicalTypeId::Varchar),
             ("format", LogicalTypeId::Varchar),
             ("channel_id", LogicalTypeId::UInteger),
             ("name", LogicalTypeId::Varchar),
             ("unit", LogicalTypeId::Varchar),
+            // Provenance of `unit`: declared / spec_default / unknown. Exposed
+            // so queries can tell a unit the file stated from one implied by
+            // the format spec, and skip channels with no unit at all.
+            ("unit_source", LogicalTypeId::Varchar),
             ("type_code", LogicalTypeId::UInteger),
             ("data_type", LogicalTypeId::Varchar),
             ("frequency_hz", LogicalTypeId::Double),
@@ -591,7 +665,7 @@ impl VTab for ChannelsVTab {
             .flat_map(|(fi, file)| (0..file.channels().len()).map(move |ci| (fi, ci)))
             .collect::<Vec<_>>();
         bind.set_cardinality(rows.len() as u64, true);
-        Ok(ChannelsBind { files, rows })
+        Ok(ChannelsBind { files, map, rows })
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
@@ -630,27 +704,38 @@ impl VTab for ChannelsVTab {
                     0 => vector.insert(row, file.path()),
                     1 => vector.insert(row, file.format()),
                     2 => vector.typed_slice::<u32>()[row] = channel.id,
-                    3 => vector.insert(row, channel.name.as_str()),
-                    4 => vector.insert(row, channel.unit.as_str()),
-                    5 => vector.typed_slice::<u32>()[row] = channel.sample_type.code(),
-                    6 => vector.insert(row, channel.sample_type.name()),
-                    7 => {
+                    3 => vector.insert(row, bind.map.name_for(&channel.name)),
+                    4 => {
+                        let (unit, _) =
+                            bind.map
+                                .unit_for(&channel.name, &channel.unit, channel.unit_source);
+                        vector.insert(row, unit.as_str())
+                    }
+                    5 => {
+                        let (_, source) =
+                            bind.map
+                                .unit_for(&channel.name, &channel.unit, channel.unit_source);
+                        vector.insert(row, source.name())
+                    }
+                    6 => vector.typed_slice::<u32>()[row] = channel.sample_type.code(),
+                    7 => vector.insert(row, channel.sample_type.name()),
+                    8 => {
                         if let Some(value) = channel.frequency_hz() {
                             vector.typed_slice::<f64>()[row] = value
                         } else {
                             vector.set_null(row)
                         }
                     }
-                    8 => {
+                    9 => {
                         if let Some(period) = channel.first_period_ns() {
                             vector.typed_slice::<u64>()[row] = period
                         } else {
                             vector.set_null(row)
                         }
                     }
-                    9 => vector.typed_slice::<u64>()[row] = channel.sample_count,
-                    10 => vector.typed_slice::<u64>()[row] = channel.chunks.len() as u64,
-                    11 => vector.typed_slice::<u64>()[row] = channel.duration_ns,
+                    10 => vector.typed_slice::<u64>()[row] = channel.sample_count,
+                    11 => vector.typed_slice::<u64>()[row] = channel.chunks.len() as u64,
+                    12 => vector.typed_slice::<u64>()[row] = channel.duration_ns,
                     _ => vector.typed_slice::<i64>()[row] = (start + row) as i64,
                 }
             }
@@ -664,6 +749,9 @@ impl VTab for ChannelsVTab {
     }
     fn parameters() -> Option<Vec<LogicalTypeHandle>> {
         Some(vec![ty(LogicalTypeId::Varchar)])
+    }
+    fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+        Some(vec![("channel_map".into(), ty(LogicalTypeId::Varchar))])
     }
 }
 
@@ -680,6 +768,13 @@ struct WideBind {
     include_filename: bool,
     include_create_date: bool,
     include_modified_at: bool,
+    /// Opt-in renaming / unit conversion applied to the wide columns.
+    /// Retained so `telemetry_column_comments` and the bind-time column names
+    /// agree on what each column is called.
+    #[allow(dead_code)]
+    map: ChannelMap,
+    /// Per wide column, the (scale, offset) to apply. None = pass through.
+    conversions: Vec<Option<(f64, f64)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -767,6 +862,28 @@ impl VTab for WideVTab {
             }
         }
 
+        // Opt-in renaming / unit conversion. Parsed before columns are
+        // declared because a rename changes the SQL column name itself.
+        let channel_map = named_channel_map(bind)?;
+        if !channel_map.is_empty() {
+            let available: Vec<String> = files
+                .iter()
+                .flat_map(|file| file.channels())
+                .map(|channel| channel.name.clone())
+                .collect();
+            channel_map.validate(&available)?;
+        }
+        // Precompute per-column conversions so the hot loop stays a multiply.
+        let conversions: Vec<Option<(f64, f64)>> = names
+            .iter()
+            .map(|name| {
+                channel_map
+                    .rule_for(name)
+                    .filter(|rule| !rule.is_identity())
+                    .map(|rule| (rule.scale, rule.offset))
+            })
+            .collect();
+
         if include_filename {
             bind.add_result_column("filename", ty(LogicalTypeId::Varchar));
         }
@@ -777,8 +894,10 @@ impl VTab for WideVTab {
             bind.add_result_column("modified_at", ty(LogicalTypeId::Timestamp));
         }
         bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
+        // Wide columns are named after channels, so a rename renames the
+        // column. Unit metadata for these is via telemetry_column_comments.
         for name in &names {
-            bind.add_result_column(name, ty(LogicalTypeId::Double));
+            bind.add_result_column(channel_map.name_for(name), ty(LogicalTypeId::Double));
         }
 
         let source_channels = files
@@ -826,6 +945,8 @@ impl VTab for WideVTab {
             include_filename,
             include_create_date,
             include_modified_at,
+            map: channel_map,
+            conversions,
         })
     }
 
@@ -909,13 +1030,19 @@ impl VTab for WideVTab {
                     let wide_idx = (col - channel_offset) as usize;
                     let mut vector = output.flat_vector(out_col);
                     if let Some(channel_idx) = bind.source_channels[segment.file][wide_idx] {
+                        // Only mapped channels are converted; everything else
+                        // passes through exactly as decoded.
+                        let conversion = bind.conversions.get(wide_idx).copied().flatten();
                         for row in 0..n {
                             let source_row = segment.row_start + row as u64;
                             let time_ns = (start_ns as u128
                                 + source_row as u128 * 1_000_000_000u128 / bind.rate as u128)
                                 as u64;
                             if let Some(value) = file.sample_at(channel_idx, time_ns, bind.linear) {
-                                vector.typed_slice::<f64>()[row] = value;
+                                vector.typed_slice::<f64>()[row] = match conversion {
+                                    Some((scale, offset)) => value * scale + offset,
+                                    None => value,
+                                };
                             } else {
                                 vector.set_null(row);
                             }
@@ -959,7 +1086,111 @@ impl VTab for WideVTab {
             ),
             ("create_date_from".into(), ty(LogicalTypeId::Timestamp)),
             ("create_date_to".into(), ty(LogicalTypeId::Timestamp)),
+            // Advanced: opt-in channel renaming and unit conversion. Inline
+            // rules or a path to a rules file.
+            ("channel_map".into(), ty(LogicalTypeId::Varchar)),
         ])
+    }
+}
+
+// ── telemetry_column_comments: unit metadata as DDL ────────────────
+//
+// DuckDB cannot attach comments to a table function's result columns, so a
+// query that wants unit metadata to persist has to materialise a table and
+// then comment its columns. This emits the exact `COMMENT ON COLUMN`
+// statements for that, so units travel with the table instead of living only
+// in a query someone has to remember to re-read.
+//
+//   CREATE TABLE laps AS SELECT * FROM read_telemetry('run.pds');
+//   -- then execute each statement from:
+//   SELECT ddl FROM telemetry_column_comments('run.pds', 'laps');
+
+struct CommentsBind {
+    statements: Vec<(String, String, String)>,
+}
+
+struct CommentsInit {
+    next: AtomicUsize,
+}
+
+struct CommentsVTab;
+
+impl VTab for CommentsVTab {
+    type BindData = CommentsBind;
+    type InitData = CommentsInit;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        let pattern = bind.get_parameter(0).to_string();
+        let table = bind.get_parameter(1).to_string();
+        let files = open_paths(bind, &pattern, None, None, None)?;
+        let map = named_channel_map(bind)?;
+
+        for (name, logical) in [
+            ("column_name", LogicalTypeId::Varchar),
+            ("unit", LogicalTypeId::Varchar),
+            ("ddl", LogicalTypeId::Varchar),
+        ] {
+            bind.add_result_column(name, ty(logical));
+        }
+
+        // Deduplicate by column name: the same channel can appear in several
+        // files of a glob, and a table has one column per name.
+        let mut seen = HashSet::new();
+        let mut columns: Vec<(String, String, UnitSource)> = Vec::new();
+        for file in &files {
+            for channel in file.channels() {
+                let column = map.name_for(&channel.name).to_owned();
+                let (unit, source) =
+                    map.unit_for(&channel.name, &channel.unit, channel.unit_source);
+                if unit.is_empty() || !seen.insert(column.clone()) {
+                    continue;
+                }
+                columns.push((column, unit, source));
+            }
+        }
+
+        let statements = channel_map::column_comment_ddl(&table, &columns)
+            .into_iter()
+            .zip(columns)
+            .map(|(ddl, (column, unit, _))| (column, unit, ddl))
+            .collect::<Vec<_>>();
+        bind.set_cardinality(statements.len() as u64, true);
+        Ok(CommentsBind { statements })
+    }
+
+    fn init(_init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        Ok(CommentsInit {
+            next: AtomicUsize::new(0),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        let bind = func.get_bind_data();
+        let state = func.get_init_data();
+        let start = state.next.fetch_add(VECTOR_SIZE as usize, Ordering::SeqCst);
+        if start >= bind.statements.len() {
+            output.set_len(0);
+            return Ok(());
+        }
+        let end = (start + VECTOR_SIZE as usize).min(bind.statements.len());
+        for (row, (column, unit, ddl)) in bind.statements[start..end].iter().enumerate() {
+            output.flat_vector(0).insert(row, column.as_str());
+            output.flat_vector(1).insert(row, unit.as_str());
+            output.flat_vector(2).insert(row, ddl.as_str());
+        }
+        output.set_len(end - start);
+        Ok(())
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        Some(vec![ty(LogicalTypeId::Varchar), ty(LogicalTypeId::Varchar)])
+    }
+
+    fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+        Some(vec![("channel_map".into(), ty(LogicalTypeId::Varchar))])
     }
 }
 
@@ -1143,5 +1374,6 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
         },
     )?;
     con.register_table_function::<WriteVTab>("write_telemetry")?;
+    con.register_table_function::<CommentsVTab>("telemetry_column_comments")?;
     Ok(())
 }
