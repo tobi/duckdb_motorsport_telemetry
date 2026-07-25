@@ -37,7 +37,7 @@
 //!
 //! Conversion is `value * scale + offset`, applied in that order.
 
-use motorsport_telemetry_core::UnitSource;
+use motorsport_telemetry_core::{units, UnitSource};
 use std::collections::HashMap;
 use std::error::Error;
 
@@ -244,6 +244,35 @@ impl ChannelMap {
 ///
 /// `columns` pairs a SQL column name with its unit and provenance. Channels
 /// with no unit are skipped rather than commented with an empty string.
+/// The unit metadata payload attached to a column, in both carriers.
+///
+/// Two carriers are needed because neither alone is sufficient:
+///
+/// - `COMMENT ON COLUMN` lives in the DuckDB catalog and is queryable via
+///   `duckdb_columns()`, but is **lost by `COPY ... TO 'x.parquet'`**.
+/// - Parquet `KV_METADATA` survives export to a file and travels to other
+///   tools, but cannot be attached to a DuckDB table.
+///
+/// Emitting both means units survive whichever way the data leaves.
+pub fn unit_payload(unit: &str, source: UnitSource) -> String {
+    let mut payload = format!("unit={unit}; source={}", source.name());
+    if let Some(def) = units::lookup(unit) {
+        // Canonical spelling and dimension make the metadata self-describing:
+        // a downstream reader can normalise and dimension-check without
+        // needing this registry.
+        if def.canonical != unit {
+            payload.push_str(&format!("; canonical={}", def.canonical));
+        }
+        payload.push_str(&format!(
+            "; dimension={}; base_unit={}",
+            def.dimension.name(),
+            def.dimension.base_unit()
+        ));
+    }
+    payload
+}
+
+/// Generate `COMMENT ON COLUMN` statements carrying each column's unit.
 pub fn column_comment_ddl(table: &str, columns: &[(String, String, UnitSource)]) -> Vec<String> {
     columns
         .iter()
@@ -252,7 +281,7 @@ pub fn column_comment_ddl(table: &str, columns: &[(String, String, UnitSource)])
             format!(
                 "COMMENT ON COLUMN {} IS '{}';",
                 quote_qualified(table, column),
-                escape_literal(&format!("unit={unit}; source={}", source.name()))
+                escape_literal(&unit_payload(unit, *source))
             )
         })
         .collect()
@@ -437,11 +466,11 @@ mod tests {
         assert_eq!(ddl.len(), 2, "unitless channels are skipped");
         assert_eq!(
             ddl[0],
-            "COMMENT ON COLUMN \"laps\".\"Ground Speed\" IS 'unit=km/h; source=declared';"
+            "COMMENT ON COLUMN \"laps\".\"Ground Speed\" IS 'unit=km/h; source=declared; dimension=speed; base_unit=m/s';"
         );
         assert_eq!(
             ddl[1],
-            "COMMENT ON COLUMN \"laps\".\"STEER\" IS 'unit=rad; source=spec_default';"
+            "COMMENT ON COLUMN \"laps\".\"STEER\" IS 'unit=rad; source=spec_default; dimension=angle; base_unit=rad';"
         );
     }
 

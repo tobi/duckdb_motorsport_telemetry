@@ -1130,7 +1130,8 @@ impl VTab for WideVTab {
 //   SELECT ddl FROM telemetry_column_comments('run.pds', 'laps');
 
 struct CommentsBind {
-    statements: Vec<(String, String, String)>,
+    /// (column, unit, comment DDL, KV_METADATA payload, channel_map rule)
+    statements: Vec<(String, String, String, String, String)>,
 }
 
 struct CommentsInit {
@@ -1152,7 +1153,15 @@ impl VTab for CommentsVTab {
         for (name, logical) in [
             ("column_name", LogicalTypeId::Varchar),
             ("unit", LogicalTypeId::Varchar),
+            // COMMENT ON COLUMN: lives in the DuckDB catalog, queryable via
+            // duckdb_columns(), but lost by COPY ... TO parquet.
             ("ddl", LogicalTypeId::Varchar),
+            // KV_METADATA payload: survives export to Parquet, where a column
+            // comment would not. Use with COPY ... (FORMAT PARQUET, KV_METADATA ...).
+            ("kv_metadata", LogicalTypeId::Varchar),
+            // The channel_map rule that reproduces this column's unit, so a
+            // map can be recovered from the file rather than written by hand.
+            ("channel_map_rule", LogicalTypeId::Varchar),
         ] {
             bind.add_result_column(name, ty(logical));
         }
@@ -1176,7 +1185,11 @@ impl VTab for CommentsVTab {
         let statements = channel_map::column_comment_ddl(&table, &columns)
             .into_iter()
             .zip(columns)
-            .map(|(ddl, (column, unit, _))| (column, unit, ddl))
+            .map(|(ddl, (column, unit, source))| {
+                let payload = channel_map::unit_payload(&unit, source);
+                let rule = format!("{column} -> {column} [{unit}]");
+                (column, unit, ddl, payload, rule)
+            })
             .collect::<Vec<_>>();
         bind.set_cardinality(statements.len() as u64, true);
         Ok(CommentsBind { statements })
@@ -1200,10 +1213,14 @@ impl VTab for CommentsVTab {
             return Ok(());
         }
         let end = (start + VECTOR_SIZE as usize).min(bind.statements.len());
-        for (row, (column, unit, ddl)) in bind.statements[start..end].iter().enumerate() {
+        for (row, (column, unit, ddl, payload, rule)) in
+            bind.statements[start..end].iter().enumerate()
+        {
             output.flat_vector(0).insert(row, column.as_str());
             output.flat_vector(1).insert(row, unit.as_str());
             output.flat_vector(2).insert(row, ddl.as_str());
+            output.flat_vector(3).insert(row, payload.as_str());
+            output.flat_vector(4).insert(row, rule.as_str());
         }
         output.set_len(end - start);
         Ok(())
