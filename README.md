@@ -102,6 +102,8 @@ One row per channel definition:
 | `channel_id` | File-local channel identifier |
 | `name`, `unit` | Original channel metadata |
 | `unit_source` | Where `unit` came from: `declared`, `spec_default`, or `unknown` |
+| `canonical_unit` | Normalised unit spelling, or `NULL` if unrecognised |
+| `dimension` | Physical dimension of the unit, or `NULL` if unrecognised |
 | `type_code`, `data_type` | Stored representation |
 | `frequency_hz`, `sample_period_ns` | Native clock |
 | `sample_count`, `chunk_count`, `duration_ns` | Physical storage summary |
@@ -266,6 +268,93 @@ If you convert the same channels repeatedly, see [Channel maps](#channel-maps-ad
 
 Channels with `unit_source = 'unknown'` are genuinely unitless — counters, gear positions, lap numbers, flags, and ratios. A few files declare marker text such as `raw`, `flag`, or `pp1`; these are reported as `spec_default` because they label a channel without naming a convertible dimension.
 
+### The unit registry
+
+Every unit these formats use is registered, so a unit string is never just text. A native MQ12Di log with 1115 channels uses only 28 distinct unit spellings, so the vocabulary is small enough to enumerate: 87 canonical units across 25 physical dimensions.
+
+`telemetry_metadata` reports the registry's view alongside the file's own spelling:
+
+| Column | Meaning |
+|---|---|
+| `unit` | Exactly what the file says, unmodified |
+| `canonical_unit` | Normalised spelling, or `NULL` if unrecognised |
+| `dimension` | Physical dimension, or `NULL` if unrecognised |
+
+This is what makes channels from different systems comparable. One file writes `sec`, another writes `s`; one writes `Lambda`, another `ratio`. They normalise to the same canonical unit and dimension:
+
+```sql
+SELECT unit AS file_unit, canonical_unit, dimension, count(*) AS channels
+FROM telemetry_metadata('*.pds')
+WHERE unit <> '' GROUP BY ALL ORDER BY channels DESC;
+```
+
+```text
+┌───────────┬────────────────┬──────────────────┬──────────┐
+│ file_unit │ canonical_unit │    dimension     │ channels │
+├───────────┼────────────────┼──────────────────┼──────────┤
+│ rad/s     │ rad/s          │ angular_velocity │        8 │
+│ Lambda    │ ratio          │ ratio            │        3 │
+│ sec       │ s              │ time             │        1 │
+└───────────┴────────────────┴──────────────────┴──────────┘
+```
+
+Browse the whole registry with `telemetry_units()`, one row per spelling:
+
+| Column | Meaning |
+|---|---|
+| `unit` | A spelling, canonical or alias |
+| `canonical_unit` | The canonical spelling it resolves to |
+| `is_canonical` | Whether `unit` is itself the canonical name |
+| `dimension`, `base_unit` | Physical dimension and its SI base unit |
+| `to_base_factor`, `to_base_offset` | `value_in_base = value * factor + offset` |
+| `is_convertible` | False for markers and counts, which have no scale |
+
+```sql
+SELECT unit, canonical_unit, dimension, base_unit, to_base_factor
+FROM telemetry_units() WHERE dimension = 'pressure' AND is_canonical;
+```
+
+### Converting between units
+
+`telemetry_convert(value, from, to)` converts within a dimension and **errors rather than returning a wrong number** when the conversion makes no sense:
+
+```sql
+SELECT telemetry_convert(74.75, 'm/s', 'km/h');      -- 269.1
+SELECT telemetry_convert(7515500, 'Pa', 'bar');      -- 75.155
+SELECT telemetry_convert(-29.8, 'm/s^2', 'g');       -- -3.0387543
+SELECT telemetry_convert(212, 'F', 'C');             -- 100.0  (affine, not just scaled)
+```
+
+```sql
+SELECT telemetry_convert(1, 'm/s', 'bar');
+-- Invalid Input Error: cannot convert 'm/s' (speed) to 'bar' (pressure):
+--                      different physical dimensions
+
+SELECT telemetry_convert(3, 'gear', '%');
+-- Invalid Input Error: cannot convert 'gear' (count) to '%' (ratio):
+--                      different physical dimensions
+
+SELECT telemetry_convert(1, 'flag', 'raw');
+-- Invalid Input Error: 'flag' is a marker, which has no scale to convert along
+
+SELECT telemetry_convert(1, 'm/s', 'furlongs');
+-- Invalid Input Error: unknown unit 'furlongs': not in the telemetry unit
+--                      registry (see telemetry_units())
+```
+
+A gear position and a percentage are both "unitless", and converting between them is meaningless. Markers (`raw`, `flag`, `Driver`) and counts (`gear`, `laps`) therefore get their own dimensions and refuse to scale, so "unitless" is not a hole in the type system.
+
+Use `telemetry_can_convert(from, to)` when you want a boolean instead of an error, for example to convert a column only where it is meaningful:
+
+```sql
+SELECT name, canonical_unit,
+       CASE WHEN telemetry_can_convert(canonical_unit, 'km/h')
+            THEN 'speed channel' ELSE 'leave alone' END AS treatment
+FROM telemetry_metadata('run.pds') WHERE canonical_unit IS NOT NULL;
+```
+
+Because every unit is stored as an affine map to its dimension's SI base unit, any unit converts to any other unit of the same dimension without an N² table of pairs, and temperatures need no special-casing.
+
 ## Writing MoTeC files
 
 `write_telemetry(source, output)` converts any supported input to a MoTeC LD file:
@@ -332,22 +421,33 @@ SELECT * FROM read_cosworth('run.pds', channel_map := 'Speed_Reff -> Speed *3.6'
 
 Mapping is deliberately explicit rather than automatic because files disagree in ways no heuristic can resolve. In one ORECA 07 export `gear` reads 1–6 while `gear_pos` reads 2–7 for the same physical gear, and the `FIA_Gps*` channels exist but are flat zero — an automatic mapper would have to guess, and would sometimes produce a plausible-looking but wrong trace.
 
-### Persisting units as column comments
+### Persisting units alongside the data
 
-DuckDB cannot attach comments to a table function's result columns, so unit metadata has to be applied to a materialised table. `telemetry_column_comments(file, table)` generates the statements:
+DuckDB cannot attach comments to a table function's result columns, so unit metadata has to be applied to a materialised table or an exported file. `telemetry_column_comments(file, table)` generates everything needed for both:
+
+| Column | Use |
+|---|---|
+| `ddl` | `COMMENT ON COLUMN` statement for a materialised table |
+| `kv_metadata` | Payload for Parquet `KV_METADATA`, which survives export |
+| `channel_map_rule` | The `channel_map` rule reproducing this column's unit |
+
+Two carriers are needed because neither alone covers every path out of DuckDB. Column comments live in the catalog and are queryable via `duckdb_columns()`, but **`COPY ... TO 'x.parquet'` drops them**. Parquet `KV_METADATA` travels with the file to other tools, but cannot annotate a DuckDB table.
+
+The payload is self-describing, so a downstream reader can normalise and dimension-check without this extension:
 
 ```sql
-SELECT column_name, unit, ddl
-FROM telemetry_column_comments('run.pds', 'laps');
+SELECT column_name, kv_metadata
+FROM telemetry_column_comments('run.pds', 'laps') WHERE unit <> '';
 ```
 
 ```text
-┌───────────┬──────┬────────────────────────────────────────────────────────────┐
-│ Speed_Ref │ m/s  │ COMMENT ON COLUMN "laps"."Speed_Ref" IS 'unit=m/s; sour...  │
-└───────────┴──────┴────────────────────────────────────────────────────────────┘
+┌──────────────────┬──────────────────────────────────────────────────────────────────────────┐
+│ Alt_RPM          │ unit=rad/s; source=declared; dimension=angular_velocity; base_unit=rad/s │
+│ System Time High │ unit=sec; source=declared; canonical=s; dimension=time; base_unit=s      │
+└──────────────────┴──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Create the table, run the generated DDL, and units travel with the table:
+For a materialised table, run the generated DDL:
 
 ```sql
 CREATE TABLE laps AS SELECT * FROM read_cosworth('run.pds', rate := 20);
@@ -355,7 +455,23 @@ CREATE TABLE laps AS SELECT * FROM read_cosworth('run.pds', rate := 20);
 SELECT column_name, comment FROM duckdb_columns() WHERE table_name = 'laps';
 ```
 
-`tests/unit_metadata_demo.sh` runs this end to end, including with a channel map.
+For Parquet, pass the payloads as `KV_METADATA` so the units outlive DuckDB:
+
+```sql
+COPY laps TO 'laps.parquet' (FORMAT PARQUET, KV_METADATA {
+  'Alt_RPM': 'unit=rad/s; source=declared; dimension=angular_velocity; base_unit=rad/s'
+});
+SELECT key::VARCHAR, value::VARCHAR FROM parquet_kv_metadata('laps.parquet');
+```
+
+`channel_map_rule` closes the loop the other way: rather than writing a map by hand, read the file's own units and use them as the starting point.
+
+```sql
+SELECT string_agg(channel_map_rule, '; ')
+FROM telemetry_column_comments('run.pds', 'laps') WHERE unit <> '';
+```
+
+`tests/units_metadata_e2e.sh` proves the whole path on a real file with no hand-written unit strings, and `tests/unit_metadata_demo.sh` runs the channel-map variant.
 
 
 ## Recursive and mixed-format globs

@@ -775,7 +775,10 @@ impl VTab for ChannelsVTab {
         Some(vec![ty(LogicalTypeId::Varchar)])
     }
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
-        Some(vec![("channel_map".into(), ty(LogicalTypeId::Varchar))])
+        Some(vec![
+            ("channel_map".into(), ty(LogicalTypeId::Varchar)),
+            ("channels".into(), ty(LogicalTypeId::Varchar)),
+        ])
     }
 }
 
@@ -1149,6 +1152,10 @@ impl VTab for CommentsVTab {
         let table = bind.get_parameter(1).to_string();
         let files = open_paths(bind, &pattern, None, None, None)?;
         let map = named_channel_map(bind)?;
+        // Scope the output to a channel subset, so the generated DDL matches a
+        // table materialised with the same `channels` filter instead of naming
+        // columns that table does not have.
+        let filter = parse_channel_filter(named_string(bind, "channels").as_deref());
 
         for (name, logical) in [
             ("column_name", LogicalTypeId::Varchar),
@@ -1173,6 +1180,14 @@ impl VTab for CommentsVTab {
         for file in &files {
             for channel in file.channels() {
                 let column = map.name_for(&channel.name).to_owned();
+                // Match on either the source or the mapped name, so a filter
+                // works whether the caller thinks in file or mapped names.
+                if !filter.is_empty()
+                    && !filter.contains(&channel.name.to_ascii_lowercase())
+                    && !filter.contains(&column.to_ascii_lowercase())
+                {
+                    continue;
+                }
                 let (unit, source) =
                     map.unit_for(&channel.name, &channel.unit, channel.unit_source);
                 if unit.is_empty() || !seen.insert(column.clone()) {
@@ -1231,7 +1246,10 @@ impl VTab for CommentsVTab {
     }
 
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
-        Some(vec![("channel_map".into(), ty(LogicalTypeId::Varchar))])
+        Some(vec![
+            ("channel_map".into(), ty(LogicalTypeId::Varchar)),
+            ("channels".into(), ty(LogicalTypeId::Varchar)),
+        ])
     }
 }
 
