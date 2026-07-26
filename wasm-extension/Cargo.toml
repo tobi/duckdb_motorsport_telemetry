@@ -2,7 +2,7 @@
 
 [package]
 name = "duckdb-motorsport-telemetry-wasm"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
@@ -23,7 +23,11 @@ cosworth-telemetry = { path = "../crates/cosworth-telemetry" }
 motec-telemetry = { path = "../crates/motec-telemetry" }
 vbo-telemetry = { path = "../crates/vbo-telemetry" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-duckdb = { version = "=1.10504.0", features = ["vtab-loadable", "loadable-extension"] }
+duckdb = { version = "=1.10504.0", features = [
+    "vtab-loadable",
+    "loadable-extension",
+    "vscalar",
+] }
 duckdb-loadable-macros = "=1.10504.0"
 glob = "0.3"
 libduckdb-sys = { version = "=1.10504.0", features = ["loadable-extension"] }

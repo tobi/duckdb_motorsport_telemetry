@@ -18,7 +18,7 @@ use motorsport_telemetry_core::units::{self, Dimension, UNITS};
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::{ty, FlatVectorExt, VECTOR_SIZE};
+use super::{ty, FlatVectorExt, VECTOR_SIZE};
 use duckdb::core::Inserter;
 
 // ── telemetry_units(): the registry as a table ──────────────────────
