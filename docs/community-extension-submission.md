@@ -25,15 +25,21 @@ DuckDB no longer needs `-unsigned`, `httpfs`, or this project's custom repositor
 
 The standalone custom repository remains useful for historical versions and DuckDB-Wasm, because the Community Extension repository exposes only the descriptor's currently pinned source revision and does not publish WASM builds.
 
-## Proposed descriptor
+## Submitted descriptor
 
-The ready-to-copy descriptor is in [`community-extension/description.yml`](../community-extension/description.yml). Before opening the upstream pull request:
+The submitted descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
+`0.6.0` at commit `b0a16ce6f79af7672a031524132414b848de8ff8` (tag `v0.6.0`) and excludes DuckDB-Wasm, musl, MinGW, and
+RTools; native Linux, macOS, and Windows MSVC are enabled.
 
-1. Set `repo.ref` to the exact reviewed commit on `tobi/duckdb_motorsport_telemetry`.
-2. Set the descriptor version to the corresponding project release.
-3. Run the repository CI and verify the Community Extension build job.
-4. Fork `duckdb/community-extensions`, copy the descriptor to `extensions/motorsport_telemetry/description.yml`, and open a pull request.
-5. Address platform-build results. The initial descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools; native Linux, macOS, and Windows MSVC remain enabled.
+The upstream pull request adds that file as `extensions/motorsport_telemetry/description.yml` in
+`duckdb/community-extensions`. Remaining work is to answer review comments and fix any platform build failures reported
+by the upstream matrix.
+
+To submit a later revision:
+
+1. Set `repo.ref` to the exact reviewed commit on `tobi/duckdb_motorsport_telemetry` and bump the descriptor version.
+2. Run the repository CI and verify the Community Extension build job.
+3. Copy the descriptor into the `duckdb/community-extensions` fork and open a pull request.
 
 ## Maintenance model
 
