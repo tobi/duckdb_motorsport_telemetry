@@ -28,7 +28,7 @@ The standalone custom repository remains useful for historical versions and Duck
 ## Submitted descriptor
 
 The submitted descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
-`0.6.1` at commit `b28c3cd3172231f7d7aa1567b9733ad2fca0a27a` (tag `v0.6.1`) and excludes DuckDB-Wasm, musl, MinGW, and
+`0.6.1` at commit `8cc06a597e33e7558be759cbffa44f2a2e1baa49` (tag `v0.6.1`) and excludes DuckDB-Wasm, musl, MinGW, and
 RTools; native Linux, macOS, and Windows MSVC are enabled.
 
 The upstream pull request adds that file as `extensions/motorsport_telemetry/description.yml` in
