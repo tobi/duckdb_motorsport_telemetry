@@ -63,7 +63,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build with DuckDB Community Extension tooling
-        run: make DUCKDB_PLATFORM=linux_amd64 TARGET_DUCKDB_VERSION=v1.5.4 release
+        run: |
+          make DUCKDB_PLATFORM=linux_amd64 TARGET_DUCKDB_VERSION=v1.5.4 configure
+          make DUCKDB_PLATFORM=linux_amd64 TARGET_DUCKDB_VERSION=v1.5.4 release
+          make DUCKDB_PLATFORM=linux_amd64 TARGET_DUCKDB_VERSION=v1.5.4 test_release
 
   duckdb-integration:
     runs-on: ubuntu-latest
