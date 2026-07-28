@@ -3,7 +3,7 @@ USE_UNSTABLE_C_API=0
 # The extension uses only the stable public C API introduced in v1.2.0.
 # Community Extensions overrides this with its current DuckDB build version.
 TARGET_DUCKDB_VERSION?=v1.2.0
-EXTENSION_VERSION?=v0.6.0
+EXTENSION_VERSION?=v0.6.1
 DUCKDB?=duckdb
 
 include extension-ci-tools/makefiles/c_api_extensions/base.Makefile
