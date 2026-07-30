@@ -357,23 +357,25 @@ Because every unit is stored as an affine map to its dimension's SI base unit, a
 
 ## Writing MoTeC files
 
-`write_telemetry(source, output)` converts any supported input to a MoTeC LD file:
+`write_telemetry(source, output)` converts any supported input to a MoTeC LD file and writes its companion `.ldx` sidecar:
 
 ```sql
 SELECT * FROM write_telemetry('run.pds', 'run.ld');
 ```
 
 ```text
-┌─────────┬────────┬─────────┬──────────┬─────────┬──────────┐
-│ source  │ output │ format  │ channels │ samples │  bytes   │
-├─────────┼────────┼─────────┼──────────┼─────────┼──────────┤
-│ run.pds │ run.ld │ motec   │       31 │ 1716105 │ 13736960 │
-└─────────┴────────┴─────────┴──────────┴─────────┴──────────┘
+┌─────────┬────────┬─────────┬──────────┬─────────┬──────────┬───────────┬───────────────┐
+│ source  │ output │ format  │ channels │ samples │  bytes   │  sidecar  │ sidecar_bytes │
+├─────────┼────────┼─────────┼──────────┼─────────┼──────────┼───────────┼───────────────┤
+│ run.pds │ run.ld │ motec   │       31 │ 1716105 │ 13736960 │ run.ldx   │          2314 │
+└─────────┴────────┴─────────┴──────────┴─────────┴──────────┴───────────┴───────────────┘
 ```
 
 The writer is lossless or it refuses. Sample values keep their full precision — float64 channels are written as float64, and `u16`/`u32` widen rather than truncate — so a PDS round-trips through LD bit-for-bit. Rather than silently degrading a recording, it returns an error when a file cannot be represented: mixed sample rates in one output, non-contiguous chunks, non-integer frequencies, or channel names and units too long for LD's fixed-width fields.
 
-Optional metadata named arguments: `driver`, `vehicle`, `venue`, `event`, `session`, `comment`, `date`, `time`.
+The LDX records supplied session metadata and recovers beacon markers from dedicated lap-trigger channels when available, falling back to an increasing lap counter. It also writes total laps and the fastest complete beacon-to-beacon lap. Unknown metadata remains empty, and no lap markers are invented when the source has no reliable signal.
+
+Optional metadata named arguments: `driver`, `vehicle`, `vehicle_number`, `team`, `venue`, `event`, `session`, `comment`, `date`, `time`.
 
 ```sql
 SELECT * FROM write_telemetry('run.pds', 'run.ld',
@@ -719,7 +721,7 @@ On a 25.5 MB PDS fixture, a selected-channel aggregate took about 2.8 ms in-proc
 ## Format notes and limitations
 
 - PDS: marker and markerless definitions, native typed channels, compact export fallback, multi-chunk ordering
-- MoTeC: LD channel data and physical conversion are supported; `.ldx` lap markers are not yet exposed as a relation
+- MoTeC: LD channel data and physical conversion are supported; writing creates an `.ldx` with inferred lap markers, though reading existing `.ldx` files as a relation is not yet supported
 - VBO: core sections, units, custom channels, midnight rollover, and irregular timestamps are supported
 - remote/httpfs paths are not yet supported
 - source units are preserved; values are not silently normalized

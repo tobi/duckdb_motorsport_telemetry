@@ -12,8 +12,13 @@ pub(crate) const CHANNEL_META_SIZE: usize = 124;
 const MIN_FILE_SIZE: usize = 0x1a0;
 const MAX_CHANNELS: usize = 4096;
 
+pub mod ldx;
 pub mod write;
-pub use write::{write_motec, write_motec_bytes, MotecMetadata, MotecWriteError};
+pub use ldx::{infer_lap_markers, write_motec_ldx_bytes, LapMarkers};
+pub use write::{
+    motec_sidecar_path, write_motec, write_motec_bytes, write_motec_sidecar, MotecMetadata,
+    MotecWriteError,
+};
 
 #[derive(Debug, Error)]
 pub enum MotecError {

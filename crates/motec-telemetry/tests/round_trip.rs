@@ -2,7 +2,9 @@
 //!
 //! These assert bit-exact recovery of every sample, not approximate equality.
 
-use motec_telemetry::{write_motec, write_motec_bytes, MotecFile, MotecMetadata, MotecWriteError};
+use motec_telemetry::{
+    motec_sidecar_path, write_motec, write_motec_bytes, MotecFile, MotecMetadata, MotecWriteError,
+};
 use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource, UnitSource};
 
 /// An in-memory source used to drive the writer with controlled shapes.
@@ -309,10 +311,14 @@ fn session_identity_survives_the_round_trip() {
         time: "17:20:00".into(),
         ..Default::default()
     };
-    let file = tempfile::NamedTempFile::new().unwrap();
-    write_motec(&source, &metadata, file.path()).unwrap();
-    let written = MotecFile::open(file.path()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("session.ld");
+    write_motec(&source, &metadata, &path).unwrap();
+    let written = MotecFile::open(&path).unwrap();
+    let sidecar = std::fs::read_to_string(motec_sidecar_path(&path)).unwrap();
 
+    assert!(sidecar.contains("Id=\"Driver\" Value=\"Tobi Lutke\""));
+    assert!(sidecar.contains("Id=\"Event\" Value=\"Sebring Test 2026\""));
     assert_eq!(written.driver, "Tobi Lutke");
     assert_eq!(written.vehicle, "Oreca 07");
     assert_eq!(written.venue, "Sebring");

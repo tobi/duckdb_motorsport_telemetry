@@ -103,6 +103,13 @@ SELECT CASE WHEN (SELECT count(*) FROM telemetry_column_comments('$motec_fixture
 SELECT CASE WHEN (SELECT ddl FROM telemetry_column_comments('$motec_fixture', 'laps') WHERE column_name='Speed') LIKE 'COMMENT ON COLUMN %laps%.%Speed% IS ''unit=%' THEN true ELSE error('column comment DDL malformed') END;"
 results="$("$DUCKDB" -unsigned -csv -noheader -c "$sql")"
 [[ "$(grep -c '^true$' <<<"$results")" = 30 ]]
+sidecar="${out_ld%.ld}.ldx"
+[[ -s "$sidecar" ]]
+python3 - "$sidecar" <<'PY'
+import sys, xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+assert root.tag == 'LDXFile'
+PY
 
 # Malformed and typo'd channel_map rules must fail at bind time rather than
 # silently doing nothing, which would mean silently unconverted data.

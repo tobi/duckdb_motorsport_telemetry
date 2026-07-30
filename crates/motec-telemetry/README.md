@@ -14,7 +14,17 @@ for channel in file.channels() {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The companion `.ldx` remains available to applications for lap markers; sample parsing does not require it.
+Sample parsing does not require the companion `.ldx`. The writer creates one alongside every exported LD, recovering beacon markers from a dedicated lap trigger (or an increasing lap counter as fallback) and carrying supplied session metadata:
+
+```rust
+use motec_telemetry::{write_motec, MotecMetadata};
+# use motorsport_telemetry_core::TelemetrySource;
+# fn export(source: &dyn TelemetrySource) -> Result<(), Box<dyn std::error::Error>> {
+write_motec(source, &MotecMetadata::default(), "run.ld")?;
+// Writes run.ld and run.ldx.
+# Ok(())
+# }
+```
 
 ```sh
 cargo run -p motec-telemetry --example inspect_motec -- run.ld

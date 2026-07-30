@@ -5,7 +5,7 @@
 //! Exits non-zero if a single sample, name, unit, rate or count differs.
 
 use cosworth_telemetry::CosworthFile;
-use motec_telemetry::{write_motec, MotecFile, MotecMetadata};
+use motec_telemetry::{motec_sidecar_path, write_motec, MotecFile, MotecMetadata};
 use motorsport_telemetry_core::TelemetrySource;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,8 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     write_motec(&pds, &metadata, &output)?;
     let elapsed = start.elapsed();
     let written_size = std::fs::metadata(&output)?.len();
+    let sidecar = motec_sidecar_path(&output);
+    let sidecar_size = std::fs::metadata(&sidecar)?.len();
     println!(
-        "wrote {output}\n      {written_size} bytes in {:.2?} ({:.1} MB/s)",
+        "wrote {output}\n      {written_size} bytes plus {} byte {} in {:.2?} ({:.1} MB/s)",
+        sidecar_size,
+        sidecar.display(),
         elapsed,
         written_size as f64 / 1e6 / elapsed.as_secs_f64()
     );

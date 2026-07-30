@@ -13,7 +13,9 @@ use duckdb_loadable_macros::duckdb_entrypoint_c_api;
 use glob::glob;
 #[cfg(target_os = "emscripten")]
 use libduckdb_sys as ffi;
-use motec_telemetry::{write_motec_bytes, MotecFile, MotecMetadata};
+use motec_telemetry::{
+    motec_sidecar_path, write_motec_bytes, write_motec_ldx_bytes, MotecFile, MotecMetadata,
+};
 use motorsport_telemetry_core::{SourceRef, UnitSource};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -1316,6 +1318,8 @@ impl VTab for WriteVTab {
             ("channels", LogicalTypeId::UBigint),
             ("samples", LogicalTypeId::UBigint),
             ("bytes", LogicalTypeId::UBigint),
+            ("sidecar", LogicalTypeId::Varchar),
+            ("sidecar_bytes", LogicalTypeId::UBigint),
         ] {
             bind.add_result_column(name, ty(logical));
         }
@@ -1323,6 +1327,8 @@ impl VTab for WriteVTab {
         let metadata = MotecMetadata {
             driver: named_string(bind, "driver").unwrap_or_default(),
             vehicle: named_string(bind, "vehicle").unwrap_or_default(),
+            vehicle_number: named_string(bind, "vehicle_number").unwrap_or_default(),
+            team: named_string(bind, "team").unwrap_or_default(),
             venue: named_string(bind, "venue").unwrap_or_default(),
             event: named_string(bind, "event").unwrap_or_default(),
             session: named_string(bind, "session").unwrap_or_default(),
@@ -1358,6 +1364,9 @@ impl VTab for WriteVTab {
         let source = &bind.files[0];
         let bytes = write_motec_bytes(source.source.as_ref(), &bind.metadata)?;
         std::fs::write(&bind.output, &bytes)?;
+        let sidecar = motec_sidecar_path(&bind.output);
+        let sidecar_bytes = write_motec_ldx_bytes(source.source.as_ref(), &bind.metadata);
+        std::fs::write(&sidecar, &sidecar_bytes)?;
 
         let channels = source
             .channels()
@@ -1376,6 +1385,10 @@ impl VTab for WriteVTab {
         output.flat_vector(3).typed_slice::<u64>()[0] = channels;
         output.flat_vector(4).typed_slice::<u64>()[0] = samples;
         output.flat_vector(5).typed_slice::<u64>()[0] = bytes.len() as u64;
+        output
+            .flat_vector(6)
+            .insert(0, sidecar.to_string_lossy().as_ref());
+        output.flat_vector(7).typed_slice::<u64>()[0] = sidecar_bytes.len() as u64;
         output.set_len(1);
         Ok(())
     }
@@ -1389,6 +1402,8 @@ impl VTab for WriteVTab {
             ("format".into(), ty(LogicalTypeId::Varchar)),
             ("driver".into(), ty(LogicalTypeId::Varchar)),
             ("vehicle".into(), ty(LogicalTypeId::Varchar)),
+            ("vehicle_number".into(), ty(LogicalTypeId::Varchar)),
+            ("team".into(), ty(LogicalTypeId::Varchar)),
             ("venue".into(), ty(LogicalTypeId::Varchar)),
             ("event".into(), ty(LogicalTypeId::Varchar)),
             ("session".into(), ty(LogicalTypeId::Varchar)),

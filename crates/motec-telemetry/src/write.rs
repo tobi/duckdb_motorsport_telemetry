@@ -66,6 +66,8 @@ pub enum MotecWriteError {
 pub struct MotecMetadata {
     pub driver: String,
     pub vehicle: String,
+    pub vehicle_number: String,
+    pub team: String,
     pub venue: String,
     pub event: String,
     pub session: String,
@@ -408,7 +410,30 @@ pub fn write_motec_bytes(
     Ok(buffer)
 }
 
-/// Serialise `source` to `path` as a MoTeC LD file.
+/// Return the conventional companion path (`recording.ldx`) for an LD path.
+pub fn motec_sidecar_path(path: impl AsRef<Path>) -> std::path::PathBuf {
+    let mut sidecar = path.as_ref().to_path_buf();
+    sidecar.set_extension("ldx");
+    sidecar
+}
+
+/// Write the companion MoTeC LDX sidecar and return its byte length.
+pub fn write_motec_sidecar(
+    source: &dyn TelemetrySource,
+    metadata: &MotecMetadata,
+    ld_path: impl AsRef<Path>,
+) -> Result<u64, MotecWriteError> {
+    let path = motec_sidecar_path(ld_path);
+    let bytes = crate::ldx::write_motec_ldx_bytes(source, metadata);
+    let len = bytes.len() as u64;
+    std::fs::write(&path, bytes).map_err(|source| MotecWriteError::Io {
+        path: path.to_string_lossy().into_owned(),
+        source,
+    })?;
+    Ok(len)
+}
+
+/// Serialise `source` to a MoTeC LD file and write its companion LDX sidecar.
 pub fn write_motec(
     source: &dyn TelemetrySource,
     metadata: &MotecMetadata,
@@ -419,5 +444,7 @@ pub fn write_motec(
     std::fs::write(path, bytes).map_err(|source| MotecWriteError::Io {
         path: path.to_string_lossy().into_owned(),
         source,
-    })
+    })?;
+    write_motec_sidecar(source, metadata, path)?;
+    Ok(())
 }
