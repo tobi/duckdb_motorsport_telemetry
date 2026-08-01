@@ -212,7 +212,7 @@ impl VboFile {
                     short_names[index].clone()
                 }
             });
-            let custom_unit_index = index.saturating_sub(BUILTIN_NAMES.len().saturating_sub(1));
+            let custom_unit_index = index.saturating_sub(BUILTIN_NAMES.len());
             // Builtin VBOX columns have units fixed by the format spec; the
             // trailing custom columns declare theirs in [channel units].
             let (unit, unit_source) = if index < BUILTIN_NAMES.len() {
@@ -322,6 +322,32 @@ mod tests {
         let file = VboFile::open(fixture.path()).unwrap();
         assert_eq!(file.time_ns, [0, 500_000_000, 1_000_000_000]);
         assert_eq!(file.sample_at(1, 250_000_000, true), Some(3.0));
+    }
+
+    #[test]
+    fn custom_channels_read_their_declared_units_in_order() {
+        // The trailing non-builtin columns declare their units in `[channel
+        // units]`, one entry per custom channel, aligned with the first custom
+        // column at index `BUILTIN_NAMES.len()`. The first custom channel must
+        // take units[0], not units[1].
+        let builtin = BUILTIN_SHORT.join(" ");
+        let builtin_header = BUILTIN_NAMES.join("\n");
+        let fixture = fixture(&format!(
+            "[header]\n{builtin_header}\ncustomA\ncustomB\n\
+             [channel units]\ncustom-unit-a\ncustom-unit-b\n\
+             [column names]\n{builtin} customA customB\n\
+             [data]\n\
+             120000.0 1 2 3 4 5 6 7 8 9 10 11 12 13\n\
+             120001.0 1 2 3 4 5 6 7 8 9 10 11 12 13\n"
+        ));
+        let file = VboFile::open(fixture.path()).unwrap();
+        assert_eq!(file.channels.len(), 14);
+        // The first builtin column keeps its spec-fixed unit (or none); the
+        // custom channels must carry exactly their declared units in order.
+        assert_eq!(file.channels[12].unit, "custom-unit-a");
+        assert_eq!(file.channels[12].unit_source, UnitSource::Declared);
+        assert_eq!(file.channels[13].unit, "custom-unit-b");
+        assert_eq!(file.channels[13].unit_source, UnitSource::Declared);
     }
 
     #[test]

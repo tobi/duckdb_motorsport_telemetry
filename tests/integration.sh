@@ -61,12 +61,14 @@ open(vbo_path, 'w').write('''[header]\ntime\nvelocity kmh\n[column names]\ntime 
 PY
 
 out_ld="$fixture_dir/roundtrip.ld"
+mapped_ld="$fixture_dir/mapped.ld"
 
 sql="LOAD '$EXTENSION';
 SELECT CASE WHEN (SELECT sample_count FROM telemetry_metadata('$fixture') WHERE name='Speed') = 4 THEN true ELSE error('bad channel metadata') END;
 SELECT CASE WHEN (SELECT DISTINCT format FROM telemetry_metadata('$fixture')) = 'pds' THEN true ELSE error('format detection failed') END;
 SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$fixture', channel='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('chunk order was not preserved') END;
 SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_telemetry('$fixture', rate=1, channels='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('wide scan failed') END;
+SELECT CASE WHEN (SELECT list(round(telemetry_convert_column(\"Speed\", 'km/h'), 6) ORDER BY time_ns) FROM read_telemetry('$fixture', rate=1, channels='Speed', unit_tags=true)) = [36.0, 39.6, 43.2, 46.8] THEN true ELSE error('tagged column conversion failed') END;
 SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_telemetry('$fixture', rate=1)) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('all-channels default failed') END;
 SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_telemetry('$fixture', rate=2, channels='Speed', end_ns=3000000000)) = [10.0, 10.5, 11.0, 11.5, 12.0, 12.5] THEN true ELSE error('mixed-rate interpolation failed') END;
 SELECT CASE WHEN (SELECT filename FROM read_telemetry('$fixture', channels='Speed', filename=true) LIMIT 1) = '$fixture' THEN true ELSE error('filename option failed') END;
@@ -88,6 +90,10 @@ SELECT CASE WHEN (SELECT unit_source FROM telemetry_metadata('$motec_fixture') W
 -- write_telemetry round-trips values bit-for-bit
 SELECT CASE WHEN (SELECT samples FROM write_telemetry('$fixture', '$out_ld')) = 8 THEN true ELSE error('write_telemetry sample count wrong') END;
 SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$out_ld', channel='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('LD round-trip lost data') END;
+-- SQL-native export mappings use lists, the unit registry, and derived sums
+SELECT CASE WHEN (SELECT [channels, samples] FROM write_telemetry('$fixture', '$mapped_ld', channel_mapping=[['Speed','Ground Speed','km/h']], sum_channels=[['Speed','Speed','Double Speed','m/s']])) = [2, 8] THEN true ELSE error('SQL-native mapped export shape failed') END;
+SELECT CASE WHEN (SELECT list(round(value, 6) ORDER BY sample_index) FROM telemetry_samples('$mapped_ld', channel='Ground Speed')) = [36.0, 39.6, 43.2, 46.8] THEN true ELSE error('automatic export unit conversion failed') END;
+SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$mapped_ld', channel='Double Speed')) = [20.0, 22.0, 24.0, 26.0] THEN true ELSE error('derived sum export failed') END;
 -- channel_map renames, converts, and reports the mapped unit as declared
 SELECT CASE WHEN (SELECT list(round(value, 6) ORDER BY sample_index) FROM telemetry_samples('$fixture', channel='Speed', channel_map='Speed -> Ground Speed [km/h] *3.6')) = [36.0, 39.6, 43.2, 46.8] THEN true ELSE error('channel_map conversion failed') END;
 SELECT CASE WHEN (SELECT DISTINCT [channel, unit, unit_source] FROM telemetry_samples('$fixture', channel='Speed', channel_map='Speed -> Ground Speed [km/h] *3.6')) = ['Ground Speed', 'km/h', 'declared'] THEN true ELSE error('channel_map metadata failed') END;
@@ -102,7 +108,19 @@ SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_sample
 SELECT CASE WHEN (SELECT count(*) FROM telemetry_column_comments('$motec_fixture', 'laps')) > 0 THEN true ELSE error('no column comments generated') END;
 SELECT CASE WHEN (SELECT ddl FROM telemetry_column_comments('$motec_fixture', 'laps') WHERE column_name='Speed') LIKE 'COMMENT ON COLUMN %laps%.%Speed% IS ''unit=%' THEN true ELSE error('column comment DDL malformed') END;"
 results="$("$DUCKDB" -unsigned -csv -noheader -c "$sql")"
-[[ "$(grep -c '^true$' <<<"$results")" = 30 ]]
+[[ "$(grep -c '^true$' <<<"$results")" = 34 ]]
+
+# Inferred conversion is intentionally restricted to direct unit-tagged reader
+# columns. Scalars and expressions must use telemetry_convert(value, from, to).
+for expression in "1.0" 'CAST("Speed" AS DOUBLE)'; do
+  from_clause=""
+  [[ "$expression" != "1.0" ]] && from_clause=" FROM read_telemetry('$fixture', channels='Speed', unit_tags=true)"
+  if "$DUCKDB" -unsigned -no-stdin -c "LOAD '$EXTENSION'; SELECT telemetry_convert_column($expression, 'km/h')$from_clause LIMIT 1;" >/dev/null 2>&1; then
+    printf 'telemetry_convert_column accepted untagged expression %s\n' "$expression" >&2
+    exit 1
+  fi
+done
+
 sidecar="${out_ld%.ld}.ldx"
 [[ -s "$sidecar" ]]
 python3 - "$sidecar" <<'PY'

@@ -16,7 +16,9 @@ use libduckdb_sys as ffi;
 use motec_telemetry::{
     motec_sidecar_path, write_motec_bytes, write_motec_ldx_bytes, MotecFile, MotecMetadata,
 };
-use motorsport_telemetry_core::{SourceRef, UnitSource};
+use motorsport_telemetry_core::{
+    units, Channel, SampleType, SourceRef, TelemetrySource, UnitSource,
+};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 #[cfg(target_os = "emscripten")]
@@ -53,6 +55,47 @@ fn named_i64(bind: &BindInfo, name: &str) -> Option<i64> {
 }
 fn named_bool(bind: &BindInfo, name: &str) -> Option<bool> {
     bind.get_named_parameter(name).map(|v| v.to_int64() != 0)
+}
+fn named_string_list(bind: &BindInfo, name: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let Some(value) = bind.get_named_parameter(name) else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .to_list()
+        .ok_or_else(|| format!("{name} must be a list of strings"))?;
+    Ok(values.into_iter().map(|value| value.to_string()).collect())
+}
+
+/// Read a SQL `VARCHAR[][]` named argument without introducing another mapping
+/// language. Each inner list is one declarative row in the SQL file.
+fn named_string_rows(
+    bind: &BindInfo,
+    name: &str,
+    width: usize,
+) -> Result<Vec<Vec<String>>, Box<dyn Error>> {
+    let Some(value) = bind.get_named_parameter(name) else {
+        return Ok(Vec::new());
+    };
+    let rows = value
+        .to_list()
+        .ok_or_else(|| format!("{name} must be a list of lists"))?;
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let cells = row
+                .to_list()
+                .ok_or_else(|| format!("{name} row {} must be a list", index + 1))?;
+            if cells.len() != width {
+                return Err(format!(
+                    "{name} row {} must contain {width} strings, got {}",
+                    index + 1,
+                    cells.len()
+                )
+                .into());
+            }
+            Ok(cells.into_iter().map(|cell| cell.to_string()).collect())
+        })
+        .collect()
 }
 
 /// Read the `channel_map` named argument.
@@ -859,6 +902,10 @@ impl VTab for WideVTab {
         let include_filename = named_bool(bind, "filename").unwrap_or(false)
             || named_bool(bind, "add_filename_as_column").unwrap_or(false);
         let include_timestamps = named_bool(bind, "timestamps").unwrap_or(false);
+        // Unit aliases are strict DuckDB logical types, so opt in: they make
+        // provenance available to telemetry_convert_column but intentionally
+        // require an explicit ::DOUBLE before generic numeric functions.
+        let tag_units = named_bool(bind, "unit_tags").unwrap_or(false);
         let include_create_date =
             include_timestamps || named_bool(bind, "add_create_date_as_column").unwrap_or(false);
         let include_modified_at =
@@ -923,10 +970,28 @@ impl VTab for WideVTab {
             bind.add_result_column("modified_at", ty(LogicalTypeId::Timestamp));
         }
         bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
-        // Wide columns are named after channels, so a rename renames the
-        // column. Unit metadata for these is via telemetry_column_comments.
+        // Wide telemetry columns remain physically DOUBLE, but known units are
+        // carried as logical aliases. telemetry_convert_column() reads this
+        // tag, while ordinary DuckDB arithmetic continues to work normally.
         for name in &names {
-            bind.add_result_column(channel_map.name_for(name), ty(LogicalTypeId::Double));
+            let declared_units = files
+                .iter()
+                .flat_map(|file| file.channels())
+                .filter(|channel| channel.name.eq_ignore_ascii_case(name))
+                .map(|channel| {
+                    channel_map
+                        .unit_for(&channel.name, &channel.unit, channel.unit_source)
+                        .0
+                })
+                .collect::<HashSet<_>>();
+            let logical = if tag_units && declared_units.len() == 1 {
+                unit_sql::tagged_double(declared_units.iter().next().unwrap())
+            } else {
+                // A mixed-file query with conflicting units has no truthful
+                // single tag. Leave it untagged so inference fails loudly.
+                ty(LogicalTypeId::Double)
+            };
+            bind.add_result_column(channel_map.name_for(name), logical);
         }
 
         let source_channels = files
@@ -1105,6 +1170,7 @@ impl VTab for WideVTab {
             ("filename".into(), ty(LogicalTypeId::Boolean)),
             ("add_filename_as_column".into(), ty(LogicalTypeId::Boolean)),
             ("timestamps".into(), ty(LogicalTypeId::Boolean)),
+            ("unit_tags".into(), ty(LogicalTypeId::Boolean)),
             (
                 "add_create_date_as_column".into(),
                 ty(LogicalTypeId::Boolean),
@@ -1265,6 +1331,211 @@ struct WriteBind {
     files: Vec<InputFile>,
     output: String,
     metadata: MotecMetadata,
+    /// SQL rows: [source, target name, target unit].
+    channel_mapping: Vec<Vec<String>>,
+    /// SQL rows: [left source, right source, target name, target unit].
+    sum_channels: Vec<Vec<String>>,
+    include_unmapped: bool,
+    exclude_channels: Vec<String>,
+}
+
+enum ExportInputs {
+    Direct(usize),
+    Sum(usize, usize),
+}
+
+struct ExportChannel {
+    inputs: ExportInputs,
+    scale: f64,
+    offset: f64,
+}
+
+/// A SQL-declared projection over a telemetry source. It gives the existing LD
+/// writer renamed, converted and derived channels without teaching the writer
+/// about SQL or any particular car schema.
+struct ExportSource {
+    source: SourceRef,
+    channels: Vec<Channel>,
+    exports: Vec<ExportChannel>,
+}
+
+fn affine_conversion(from: &str, to: &str) -> Result<(f64, f64), Box<dyn Error>> {
+    if from.eq_ignore_ascii_case(to) || units::normalize(from) == units::normalize(to) {
+        return Ok((1.0, 0.0));
+    }
+    let offset = units::convert(0.0, from, to)?;
+    let scale = units::convert(1.0, from, to)? - offset;
+    Ok((scale, offset))
+}
+
+impl ExportSource {
+    fn new(
+        source: SourceRef,
+        mapping: &[Vec<String>],
+        sums: &[Vec<String>],
+        include_unmapped: bool,
+        exclude_channels: &[String],
+    ) -> Result<Self, Box<dyn Error>> {
+        if mapping.is_empty() && sums.is_empty() && exclude_channels.is_empty() {
+            return Ok(Self {
+                channels: source.channels().to_vec(),
+                exports: (0..source.channels().len())
+                    .map(|index| ExportChannel {
+                        inputs: ExportInputs::Direct(index),
+                        scale: 1.0,
+                        offset: 0.0,
+                    })
+                    .collect(),
+                source,
+            });
+        }
+        let find = |name: &str| {
+            source
+                .channels()
+                .iter()
+                .position(|channel| channel.name.eq_ignore_ascii_case(name))
+                .ok_or_else(|| format!("export source channel not found: {name}"))
+        };
+        let mut channels = Vec::with_capacity(source.channels().len() + sums.len());
+        let mut exports = Vec::with_capacity(source.channels().len() + sums.len());
+        let mut target_names = HashSet::new();
+        let mut mapped_sources = HashSet::new();
+        let excluded = exclude_channels
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+
+        for row in mapping {
+            let index = find(&row[0])?;
+            mapped_sources.insert(index);
+            let original = &source.channels()[index];
+            let target_name = row[1].trim();
+            let target_unit = row[2].trim();
+            if target_name.is_empty() {
+                return Err(format!("empty target name for {}", row[0]).into());
+            }
+            if !target_names.insert(target_name.to_ascii_lowercase()) {
+                return Err(format!("duplicate export target channel: {target_name}").into());
+            }
+            let unit = if target_unit.is_empty() {
+                original.unit.as_str()
+            } else {
+                target_unit
+            };
+            let (scale, offset) = affine_conversion(&original.unit, unit)?;
+            let mut channel = original.clone();
+            channel.name = target_name.to_owned();
+            channel.unit = unit.to_owned();
+            if !target_unit.is_empty() {
+                channel.unit_source = UnitSource::Declared;
+            }
+            if scale != 1.0 || offset != 0.0 {
+                channel.sample_type = SampleType::F64;
+            }
+            channels.push(channel);
+            exports.push(ExportChannel {
+                inputs: ExportInputs::Direct(index),
+                scale,
+                offset,
+            });
+        }
+
+        if include_unmapped {
+            for (index, original) in source.channels().iter().enumerate() {
+                if mapped_sources.contains(&index)
+                    || excluded.contains(&original.name.to_ascii_lowercase())
+                {
+                    continue;
+                }
+                if !target_names.insert(original.name.to_ascii_lowercase()) {
+                    return Err(
+                        format!("duplicate export target channel: {}", original.name).into(),
+                    );
+                }
+                channels.push(original.clone());
+                exports.push(ExportChannel {
+                    inputs: ExportInputs::Direct(index),
+                    scale: 1.0,
+                    offset: 0.0,
+                });
+            }
+        }
+
+        for row in sums {
+            let left_index = find(&row[0])?;
+            let right_index = find(&row[1])?;
+            let left = &source.channels()[left_index];
+            let right = &source.channels()[right_index];
+            if left.chunks.len() != right.chunks.len()
+                || left.sample_count != right.sample_count
+                || left.chunks.iter().zip(&right.chunks).any(|(a, b)| {
+                    a.sample_period_ns != b.sample_period_ns
+                        || a.sample_count != b.sample_count
+                        || a.time_base_ns != b.time_base_ns
+                })
+            {
+                return Err(
+                    format!("cannot sum {} and {}: sample clocks differ", row[0], row[1]).into(),
+                );
+            }
+            if units::normalize(&left.unit) != units::normalize(&right.unit) {
+                return Err(format!(
+                    "cannot sum {} [{}] and {} [{}]: units differ",
+                    row[0], left.unit, row[1], right.unit
+                )
+                .into());
+            }
+            let target_name = row[2].trim();
+            let target_unit = row[3].trim();
+            if target_name.is_empty() || target_unit.is_empty() {
+                return Err("sum_channels target name and unit cannot be empty".into());
+            }
+            if !target_names.insert(target_name.to_ascii_lowercase()) {
+                return Err(format!("duplicate export target channel: {target_name}").into());
+            }
+            let (scale, offset) = affine_conversion(&left.unit, target_unit)?;
+            let mut channel = left.clone();
+            channel.name = target_name.to_owned();
+            channel.unit = target_unit.to_owned();
+            channel.unit_source = UnitSource::Declared;
+            channel.sample_type = SampleType::F64;
+            channels.push(channel);
+            exports.push(ExportChannel {
+                inputs: ExportInputs::Sum(left_index, right_index),
+                scale,
+                offset,
+            });
+        }
+
+        Ok(Self {
+            source,
+            channels,
+            exports,
+        })
+    }
+}
+
+impl TelemetrySource for ExportSource {
+    fn path(&self) -> &str {
+        self.source.path()
+    }
+    fn format(&self) -> &'static str {
+        self.source.format()
+    }
+    fn channels(&self) -> &[Channel] {
+        &self.channels
+    }
+    fn decode(&self, channel_index: usize, chunk_index: usize, local_index: u64) -> f64 {
+        let export = &self.exports[channel_index];
+        let value = match export.inputs {
+            ExportInputs::Direct(index) => self.source.decode(index, chunk_index, local_index),
+            ExportInputs::Sum(left, right) => {
+                self.source.decode(left, chunk_index, local_index)
+                    + self.source.decode(right, chunk_index, local_index)
+            }
+        };
+        value * export.scale + export.offset
+    }
 }
 
 struct WriteInit {
@@ -1324,6 +1595,10 @@ impl VTab for WriteVTab {
             bind.add_result_column(name, ty(logical));
         }
         bind.set_cardinality(1, true);
+        let channel_mapping = named_string_rows(bind, "channel_mapping", 3)?;
+        let sum_channels = named_string_rows(bind, "sum_channels", 4)?;
+        let include_unmapped = named_bool(bind, "include_unmapped").unwrap_or(false);
+        let exclude_channels = named_string_list(bind, "exclude_channels")?;
         let metadata = MotecMetadata {
             driver: named_string(bind, "driver").unwrap_or_default(),
             vehicle: named_string(bind, "vehicle").unwrap_or_default(),
@@ -1341,6 +1616,10 @@ impl VTab for WriteVTab {
             files,
             output,
             metadata,
+            channel_mapping,
+            sum_channels,
+            include_unmapped,
+            exclude_channels,
         })
     }
 
@@ -1361,11 +1640,20 @@ impl VTab for WriteVTab {
             return Ok(());
         }
         let bind = func.get_bind_data();
-        let source = &bind.files[0];
-        let bytes = write_motec_bytes(source.source.as_ref(), &bind.metadata)?;
+        let input = &bind.files[0];
+        let source = ExportSource::new(
+            Arc::clone(&input.source),
+            &bind.channel_mapping,
+            &bind.sum_channels,
+            bind.include_unmapped,
+            &bind.exclude_channels,
+        )?;
+        let bytes = write_motec_bytes(&source, &bind.metadata)?;
         std::fs::write(&bind.output, &bytes)?;
         let sidecar = motec_sidecar_path(&bind.output);
-        let sidecar_bytes = write_motec_ldx_bytes(source.source.as_ref(), &bind.metadata);
+        // Infer beacons from the full input even when the SQL projection omits
+        // lap channels from the LD output.
+        let sidecar_bytes = write_motec_ldx_bytes(input.source.as_ref(), &bind.metadata);
         std::fs::write(&sidecar, &sidecar_bytes)?;
 
         let channels = source
@@ -1379,7 +1667,7 @@ impl VTab for WriteVTab {
             .map(|channel| channel.sample_count)
             .sum::<u64>();
 
-        output.flat_vector(0).insert(0, source.path());
+        output.flat_vector(0).insert(0, input.path());
         output.flat_vector(1).insert(0, bind.output.as_str());
         output.flat_vector(2).insert(0, "motec");
         output.flat_vector(3).typed_slice::<u64>()[0] = channels;
@@ -1398,8 +1686,17 @@ impl VTab for WriteVTab {
     }
 
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+        let string_list = LogicalTypeHandle::list(&ty(LogicalTypeId::Varchar));
+        let string_rows = LogicalTypeHandle::list(&string_list);
         Some(vec![
             ("format".into(), ty(LogicalTypeId::Varchar)),
+            ("channel_mapping".into(), string_rows),
+            ("include_unmapped".into(), ty(LogicalTypeId::Boolean)),
+            ("exclude_channels".into(), string_list),
+            (
+                "sum_channels".into(),
+                LogicalTypeHandle::list(&LogicalTypeHandle::list(&ty(LogicalTypeId::Varchar))),
+            ),
             ("driver".into(), ty(LogicalTypeId::Varchar)),
             ("vehicle".into(), ty(LogicalTypeId::Varchar)),
             ("vehicle_number".into(), ty(LogicalTypeId::Varchar)),
@@ -1451,6 +1748,321 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<CommentsVTab>("telemetry_column_comments")?;
     con.register_table_function::<unit_sql::UnitsVTab>("telemetry_units")?;
     con.register_scalar_function::<unit_sql::ConvertScalar>("telemetry_convert")?;
+    con.register_scalar_function::<unit_sql::ConvertColumnScalar>("telemetry_convert_column")?;
     con.register_scalar_function::<unit_sql::CanConvertScalar>("telemetry_can_convert")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use motorsport_telemetry_core::Chunk;
+
+    struct Synthetic {
+        channels: Vec<Channel>,
+        values: Vec<Vec<Vec<f64>>>,
+    }
+
+    impl TelemetrySource for Synthetic {
+        fn path(&self) -> &str {
+            "synthetic"
+        }
+        fn format(&self) -> &'static str {
+            "synthetic"
+        }
+        fn channels(&self) -> &[Channel] {
+            &self.channels
+        }
+        fn decode(&self, channel_index: usize, chunk_index: usize, local_index: u64) -> f64 {
+            self.values[channel_index][chunk_index][local_index as usize]
+        }
+    }
+
+    /// A single-chunk channel at 1 Hz holding `values`, named/unit-tagged later.
+    fn named(name: &str, unit: &str, values: &[f64]) -> (Channel, Vec<Vec<f64>>) {
+        let count = values.len() as u64;
+        (
+            Channel {
+                id: 1,
+                name: name.into(),
+                unit: unit.into(),
+                unit_source: if unit.is_empty() {
+                    UnitSource::Unknown
+                } else {
+                    UnitSource::Declared
+                },
+                sample_type: SampleType::F64,
+                chunks: vec![Chunk {
+                    sample_period_ns: 1_000_000_000,
+                    sample_count: count,
+                    data_ptr: 0,
+                    sample_base: 0,
+                    time_base_ns: 0,
+                }],
+                sample_count: count,
+                duration_ns: count * 1_000_000_000,
+            },
+            vec![values.to_vec()],
+        )
+    }
+
+    fn source(parts: Vec<(Channel, Vec<Vec<f64>>)>) -> SourceRef {
+        let (channels, values) = parts.into_iter().unzip();
+        Arc::new(Synthetic { channels, values })
+    }
+
+    // ── affine_conversion ────────────────────────────────────────────
+
+    #[test]
+    fn affine_conversion_reproduces_units_convert_exactly() {
+        // The writer applies decode's projected value as `v * scale + offset`;
+        // that must equal `units::convert(v, from, to)` for every value, or
+        // projected exports would drift from the truthful conversion.
+        for (from, to) in [
+            ("m/s", "km/h"),
+            ("km/h", "m/s"),
+            ("°C", "°F"),
+            ("°F", "°C"),
+            ("Pa", "bar"),
+            ("m", "mm"),
+        ] {
+            let (scale, offset) = affine_conversion(from, to).unwrap();
+            for value in [-100.0, -12.5, 0.0, 0.2, 100.0, 273.15, 1e3] {
+                let linear = value * scale + offset;
+                let conv = units::convert(value, from, to).unwrap();
+                assert!(
+                    (linear - conv).abs() <= 1e-9 * (1.0 + conv.abs()),
+                    "{from}->{to} at {value}: linear {linear} vs convert {conv}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn affine_conversion_is_identity_for_same_unit_and_spellings() {
+        assert_eq!(affine_conversion("m/s", "m/s").unwrap(), (1.0, 0.0));
+        // Case-insensitive.
+        assert_eq!(affine_conversion("M/S", "m/s").unwrap(), (1.0, 0.0));
+        // Alias vs canonical of the same unit.
+        assert_eq!(affine_conversion("°C", "Celsius").unwrap(), (1.0, 0.0));
+    }
+
+    #[test]
+    fn affine_conversion_rejects_unknown_and_mismatched_units() {
+        assert!(affine_conversion("m/s", "nonexistent").is_err());
+        assert!(affine_conversion("nonexistent", "m/s").is_err());
+        // Different dimensions (speed vs pressure) must not silently convert.
+        assert!(affine_conversion("m/s", "bar").is_err());
+    }
+
+    // ── ExportSource ─────────────────────────────────────────────────
+
+    #[test]
+    fn direct_mapping_renames_converts_and_follows_unity() {
+        let (mut spd, sv) = named("Speed", "m/s", &[10.0, 20.0]);
+        spd.sample_type = SampleType::I32; // integer raw storage stays integer-ish
+        let src = source(vec![(spd, sv)]);
+        let mapping = vec![vec!["Speed".into(), "Ground Speed".into(), "km/h".into()]];
+        let ext = ExportSource::new(Arc::clone(&src), &mapping, &[], false, &[]).unwrap();
+        assert_eq!(ext.channels().len(), 1);
+        let ch = &ext.channels()[0];
+        assert_eq!(ch.name, "Ground Speed");
+        assert_eq!(ch.unit, "km/h");
+        assert_eq!(ch.unit_source, UnitSource::Declared);
+        // A non-identity conversion forces f64 so the scale cannot truncate.
+        assert_eq!(ch.sample_type, SampleType::F64);
+        assert_eq!(ext.decode(0, 0, 0), 36.0);
+        assert_eq!(ext.decode(0, 0, 1), 72.0);
+    }
+
+    #[test]
+    fn sum_channel_adds_sources_and_converts_the_total() {
+        let (mut l, lv) = named("Left", "m/s", &[1.0, 2.0]);
+        l.unit = "m/s".into();
+        l.unit_source = UnitSource::Declared;
+        let (mut r, rv) = named("Right", "m/s", &[3.0, 4.0]);
+        r.unit = "m/s".into();
+        r.unit_source = UnitSource::Declared;
+        let src = source(vec![(l, lv), (r, rv)]);
+        let sums = vec![vec![
+            "Left".into(),
+            "Right".into(),
+            "Total".into(),
+            "km/h".into(),
+        ]];
+        let ext = ExportSource::new(Arc::clone(&src), &[], &sums, false, &[]).unwrap();
+        assert_eq!(ext.channels().len(), 1);
+        assert_eq!(ext.channels()[0].name, "Total");
+        assert_eq!(ext.channels()[0].unit, "km/h");
+        assert_eq!(ext.channels()[0].sample_type, SampleType::F64);
+        // (1+3) m/s -> 14.4 km/h; (2+4) m/s -> 21.6 km/h.
+        assert!((ext.decode(0, 0, 0) - 14.4).abs() < 1e-9);
+        assert!((ext.decode(0, 0, 1) - 21.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn channels_and_exports_stay_aligned_under_mixed_projection() {
+        let mk = |name: &str, unit: &str, vals: &[f64]| named(name, unit, vals);
+        let src = source(vec![
+            mk("Speed", "m/s", &[10.0, 20.0]),
+            mk("Steer", "rad", &[0.5, 1.0]),
+            mk("T1", "K", &[300.0, 310.0]),
+            mk("T2", "K", &[260.0, 270.0]),
+        ]);
+        let mapping = vec![vec!["Speed".into(), "Ground Speed".into(), "km/h".into()]];
+        let sums = vec![vec!["T1".into(), "T2".into(), "Tsum".into(), "°C".into()]];
+        let ext = ExportSource::new(Arc::clone(&src), &mapping, &sums, true, &[]).unwrap();
+        let names: Vec<_> = ext.channels().iter().map(|c| c.name.as_str()).collect();
+        // Mappings first, then unmapped (Steer, T1, T2), then sums.
+        assert_eq!(names, vec!["Ground Speed", "Steer", "T1", "T2", "Tsum"]);
+
+        // Each exported index must decode against its own export entry, proving
+        // the channels[]/exports[] vectors never drift out of alignment.
+        assert_eq!(ext.decode(0, 0, 0), 36.0); // Speed converted
+        assert_eq!(ext.decode(1, 0, 0), 0.5); // Steer passthrough
+        assert_eq!(ext.decode(2, 0, 0), 300.0); // T1 passthrough
+        assert_eq!(ext.decode(3, 0, 0), 260.0); // T2 passthrough
+        let expected = units::convert(560.0, "K", "°C").unwrap();
+        assert!((ext.decode(4, 0, 0) - expected).abs() < 1e-9); // (T1+T2)
+    }
+
+    #[test]
+    fn empty_projection_passes_every_channel_through_untouched() {
+        let src = source(vec![
+            named("A", "m/s", &[1.0, 2.0]),
+            named("B", "m/s", &[3.0, 4.0]),
+        ]);
+        let ext = ExportSource::new(Arc::clone(&src), &[], &[], false, &[]).unwrap();
+        assert_eq!(ext.channels().len(), 2);
+        assert_eq!(ext.channels()[0].name, "A");
+        assert_eq!(ext.channels()[1].unit, "m/s");
+        assert_eq!(ext.channels()[1].unit_source, UnitSource::Declared);
+        assert_eq!(ext.decode(0, 0, 0), 1.0);
+        assert_eq!(ext.decode(1, 0, 1), 4.0);
+    }
+
+    #[test]
+    fn include_unmapped_and_exclude_control_the_projection() {
+        let src = source(vec![
+            named("A", "m/s", &[1.0, 2.0]),
+            named("B", "m/s", &[3.0, 4.0]),
+            named("C", "m/s", &[5.0, 6.0]),
+        ]);
+        let mapping = vec![vec!["A".into(), "X".into(), "m/s".into()]];
+
+        let only_mapped = ExportSource::new(Arc::clone(&src), &mapping, &[], false, &[]).unwrap();
+        let names: Vec<_> = only_mapped
+            .channels()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["X"]);
+
+        let all = ExportSource::new(Arc::clone(&src), &mapping, &[], true, &[]).unwrap();
+        let names: Vec<_> = all.channels().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["X", "B", "C"]);
+
+        // Exclusion is case-insensitive and drops the unmapped channel only.
+        let excluded =
+            ExportSource::new(Arc::clone(&src), &mapping, &[], true, &["b".into()]).unwrap();
+        let names: Vec<_> = excluded
+            .channels()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["X", "C"]);
+    }
+
+    #[test]
+    fn export_rejects_bad_projections() {
+        let (mut x, xv) = named("A", "m/s", &[1.0, 2.0]);
+        x.unit_source = UnitSource::Declared;
+        let (mut y, yv) = named("B", "m/s", &[3.0, 4.0]);
+        y.unit_source = UnitSource::Declared;
+        let (mut z, zv) = named("C", "kg", &[5.0, 6.0]);
+        z.unit_source = UnitSource::Declared;
+        let src = source(vec![
+            (x.clone(), xv.clone()),
+            (y.clone(), yv.clone()),
+            (z.clone(), zv.clone()),
+        ]);
+
+        // Unknown source channel.
+        assert!(ExportSource::new(
+            Arc::clone(&src),
+            &[vec!["Nope".into(), "X".into(), "m/s".into()]],
+            &[],
+            false,
+            &[]
+        )
+        .is_err());
+        // Empty target name.
+        assert!(ExportSource::new(
+            Arc::clone(&src),
+            &[vec!["A".into(), "  ".into(), "m/s".into()]],
+            &[],
+            false,
+            &[]
+        )
+        .is_err());
+        // Duplicate target names, even under different casing.
+        assert!(ExportSource::new(
+            Arc::clone(&src),
+            &[
+                vec!["A".into(), "X".into(), "m/s".into()],
+                vec!["B".into(), "x".into(), "m/s".into()]
+            ],
+            &[],
+            false,
+            &[]
+        )
+        .is_err());
+        // Mapping across incompatible dimensions.
+        assert!(ExportSource::new(
+            Arc::clone(&src),
+            &[vec!["A".into(), "X".into(), "kg".into()]],
+            &[],
+            false,
+            &[]
+        )
+        .is_err());
+        // Sum sources on different sample clocks.
+        let (mut slow, slowv) = named("Slow", "m/s", &[7.0, 8.0]);
+        slow.chunks[0].sample_period_ns = 2_000_000_000;
+        slow.unit_source = UnitSource::Declared;
+        let src2 = source(vec![(x.clone(), xv.clone()), (slow, slowv)]);
+        assert!(ExportSource::new(
+            Arc::clone(&src2),
+            &[],
+            &[vec!["A".into(), "Slow".into(), "Sum".into(), "m/s".into()]],
+            false,
+            &[]
+        )
+        .is_err());
+        // Sum sources with incompatible dimensions.
+        let src3 = source(vec![(x.clone(), xv.clone()), (z.clone(), zv.clone())]);
+        assert!(ExportSource::new(
+            Arc::clone(&src3),
+            &[],
+            &[vec!["A".into(), "C".into(), "Sum".into(), "m/s".into()]],
+            false,
+            &[]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sum_with_identical_units_and_clocks_needs_no_conversion() {
+        let (mut l, lv) = named("L", "m/s", &[1.0, 2.0]);
+        l.unit_source = UnitSource::Declared;
+        let (mut r, rv) = named("R", "m/s", &[3.0, 4.0]);
+        r.unit_source = UnitSource::Declared;
+        let src = source(vec![(l, lv), (r, rv)]);
+        let sums = vec![vec!["L".into(), "R".into(), "LR".into(), "m/s".into()]];
+        let ext = ExportSource::new(Arc::clone(&src), &[], &sums, false, &[]).unwrap();
+        let ch = &ext.channels()[0];
+        assert_eq!(ch.unit, "m/s");
+        assert_eq!(ch.unit_source, UnitSource::Declared);
+        assert_eq!(ext.decode(0, 0, 0), 4.0);
+    }
 }

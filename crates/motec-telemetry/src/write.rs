@@ -160,10 +160,21 @@ fn checked_text(
     value: &str,
     capacity: usize,
 ) -> Result<Vec<u8>, MotecWriteError> {
-    // LD stores single-byte characters and needs room for a NUL terminator on
-    // anything that fills the field, so cap at `capacity - 1`.
-    let bytes = value.as_bytes();
-    if bytes.len() >= capacity || !value.is_ascii() {
+    // LD text is a fixed-width Windows/Latin-1 byte field. MoTeC commonly
+    // writes the degree sign as byte 0xb0 (for example `°C`), so UTF-8 bytes
+    // cannot be copied directly and ASCII-only validation is too strict.
+    let bytes = value
+        .chars()
+        .map(|character| {
+            u8::try_from(character as u32).map_err(|_| MotecWriteError::FieldTooLong {
+                field,
+                capacity,
+                len: value.chars().count(),
+                value: value.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if bytes.len() >= capacity {
         return Err(MotecWriteError::FieldTooLong {
             field,
             capacity,
@@ -171,7 +182,7 @@ fn checked_text(
             value: value.to_owned(),
         });
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 /// Verify a channel is representable in LD and collect its samples in order.
@@ -392,10 +403,12 @@ pub fn write_motec_bytes(
         put_i16(&mut buffer, at + 0x1a, 1); // mul
         put_i16(&mut buffer, at + 0x1c, 1); // scale
         put_i16(&mut buffer, at + 0x1e, 0); // decimal places
-        put(&mut buffer, at + 0x20, channel.name.as_bytes());
-        let short = &channel.name.as_bytes()[..channel.name.len().min(SHORT_NAME_CAP - 1)];
+        let encoded_name = checked_text("channel name", &channel.name, NAME_CAP)?;
+        let encoded_unit = checked_text("channel unit", &channel.unit, UNIT_CAP)?;
+        put(&mut buffer, at + 0x20, &encoded_name);
+        let short = &encoded_name[..encoded_name.len().min(SHORT_NAME_CAP - 1)];
         put(&mut buffer, at + 0x40, short);
-        put(&mut buffer, at + 0x48, channel.unit.as_bytes());
+        put(&mut buffer, at + 0x48, &encoded_unit);
         channel_data_ptr += channel.values.len() * channel.encoding.width as usize;
     }
 
@@ -447,4 +460,49 @@ pub fn write_motec(
     })?;
     write_motec_sidecar(source, metadata, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latin1_characters_encode_as_single_ld_bytes() {
+        // LD holds Windows/Latin-1 bytes; the degree sign is 0xb0, one byte,
+        // even though its UTF-8 form is two bytes. This must stay symmetric
+        // with the reader, which maps each byte back via `char::from`.
+        assert_eq!(checked_text("unit", "°C", 12).unwrap(), vec![0xb0, b'C']);
+    }
+
+    #[test]
+    fn capacity_is_counted_in_encoded_bytes_not_utf8_bytes() {
+        // Sixteen degree signs are 16 Latin-1 bytes but 32 UTF-8 bytes; the
+        // byte count (not the character count) governs the LD field capacity.
+        let sixteen: String = "°".repeat(16);
+        assert!(checked_text("unit", &sixteen, 17).is_ok());
+        let err = checked_text("unit", &"°".repeat(17), 17).unwrap_err();
+        assert!(matches!(
+            err,
+            MotecWriteError::FieldTooLong {
+                capacity: 17,
+                len: 17,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_latin1_characters_are_rejected() {
+        // U+20AC is outside the single-byte Latin-1 range LD can store.
+        let err = checked_text("unit", "€/h", 12).unwrap_err();
+        assert!(matches!(err, MotecWriteError::FieldTooLong { .. }));
+    }
+
+    #[test]
+    fn ascii_text_must_fit_capacity_minus_nul() {
+        // ASCII is unaffected by the Latin-1 change: an all-filling field is
+        // still rejected because LD text needs a NUL terminator.
+        assert!(checked_text("name", &"x".repeat(NAME_CAP - 1), NAME_CAP).is_ok());
+        assert!(checked_text("name", &"x".repeat(NAME_CAP), NAME_CAP).is_err());
+    }
 }
