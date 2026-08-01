@@ -4,8 +4,9 @@
 //!
 //! - `telemetry_units()` — the registry as a table, so the vocabulary is
 //!   discoverable rather than buried in Rust.
-//! - `telemetry_convert(value, from, to)` — dimension-checked conversion that
-//!   errors on nonsense instead of returning a wrong number.
+//! - `telemetry_convert(value, from, to)` — explicit dimension-checked conversion.
+//! - `telemetry_convert_column(column, to)` — reads the source unit tag emitted
+//!   by the wide telemetry readers and refuses ordinary scalar expressions.
 //! - `telemetry_can_convert(from, to)` — a boolean probe for the same.
 
 use duckdb::core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId};
@@ -20,6 +21,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{ty, FlatVectorExt, VECTOR_SIZE};
 use duckdb::core::Inserter;
+
+const UNIT_ALIAS_PREFIX: &str = "telemetry_unit:";
+
+/// A DOUBLE carrying a canonical telemetry unit as its DuckDB logical alias.
+/// The physical representation stays numeric, so ordinary SQL remains fast.
+pub fn tagged_double(unit: &str) -> LogicalTypeHandle {
+    let mut logical = ty(LogicalTypeId::Double);
+    if let Some(canonical) = units::normalize(unit) {
+        logical.set_alias(&format!("{UNIT_ALIAS_PREFIX}{canonical}"));
+    }
+    logical
+}
+
+fn tagged_unit(logical: &LogicalTypeHandle) -> Option<String> {
+    logical
+        .get_alias()?
+        .strip_prefix(UNIT_ALIAS_PREFIX)
+        .map(str::to_owned)
+}
 
 // ── telemetry_units(): the registry as a table ──────────────────────
 
@@ -170,6 +190,51 @@ impl VScalar for ConvertScalar {
                 ty(LogicalTypeId::Varchar),
                 ty(LogicalTypeId::Varchar),
             ],
+            ty(LogicalTypeId::Double),
+        )]
+    }
+}
+
+// ── telemetry_convert_column(tagged_column, to) ────────────────────
+
+/// Convert a unit-tagged wide-reader column without repeating its source unit.
+///
+/// Expressions and scalar literals deliberately fail because DuckDB strips the
+/// source column's logical alias once provenance is no longer unambiguous. Use
+/// the explicit three-argument `telemetry_convert` for those values.
+pub struct ConvertColumnScalar;
+
+impl VScalar for ConvertColumnScalar {
+    type State = ();
+
+    fn invoke(
+        _state: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let from_unit = tagged_unit(&input.flat_vector(0).logical_type()).ok_or(
+            "telemetry_convert_column requires a unit-tagged column from read_telemetry, \
+             read_cosworth, or read_motec; for a scalar or expression use \
+             telemetry_convert(value, from_unit, to_unit)",
+        )?;
+        let rows = input.len();
+        let values = input.flat_vector(0);
+        let values = unsafe { values.as_slice_with_len::<f64>(rows) };
+        let to = input.flat_vector(1);
+        let to = unsafe { to.as_slice_with_len::<duckdb_string_t>(rows) };
+
+        let mut result = output.flat_vector();
+        let out = unsafe { result.as_mut_slice_with_len::<f64>(rows) };
+        for row in 0..rows {
+            let to_unit = DuckString::new(&mut { to[row] }).as_str().to_string();
+            out[row] = units::convert(values[row], &from_unit, &to_unit)?;
+        }
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        vec![ScalarFunctionSignature::exact(
+            vec![ty(LogicalTypeId::Any), ty(LogicalTypeId::Varchar)],
             ty(LogicalTypeId::Double),
         )]
     }

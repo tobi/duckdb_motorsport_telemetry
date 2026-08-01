@@ -202,6 +202,7 @@ Named arguments:
 - `filename := true` — add a `filename` column
 - `add_filename_as_column := true` — explicit alias for `filename`
 - `timestamps := true` — add both `create_date` and `modified_at`
+- `unit_tags := true` — expose known channel units as strict DuckDB logical type aliases for `telemetry_convert_column`
 - `add_create_date_as_column := true` — add filesystem creation time, with modified time as its fallback
 - `add_modified_at_as_column := true` — add filesystem modification time
 - `create_date_from := TIMESTAMP '2026-07-01'` — inclusive pre-open file pruning
@@ -344,6 +345,30 @@ SELECT telemetry_convert(1, 'm/s', 'furlongs');
 
 A gear position and a percentage are both "unitless", and converting between them is meaningless. Markers (`raw`, `flag`, `Driver`) and counts (`gear`, `laps`) therefore get their own dimensions and refuse to scale, so "unitless" is not a hole in the type system.
 
+For direct wide-reader columns, opt into strict unit tags and let `telemetry_convert_column(column, to)` infer the source unit from the column type:
+
+```sql
+SELECT telemetry_convert_column("STEER", 'deg') AS "Steering Angle",
+       telemetry_convert_column("RPM", 'rpm') AS "Engine RPM"
+FROM read_cosworth(
+    'run.pds',
+    channels := 'STEER,RPM',
+    unit_tags := true
+);
+```
+
+A tagged column remains physically a `DOUBLE`, but its logical type is visible—for example, `typeof("STEER")` is `telemetry_unit:rad`. The tag is intentionally strict. Cast to `DOUBLE` for generic numeric functions, or convert it to an ordinary `DOUBLE` with `telemetry_convert_column`.
+
+Inference refuses literals, expressions, unknown-unit channels, and mixed-file columns whose source units conflict:
+
+```sql
+SELECT telemetry_convert_column(1.0, 'deg');
+-- Invalid Input Error: telemetry_convert_column requires a unit-tagged column ...
+-- for a scalar or expression use telemetry_convert(value, from_unit, to_unit)
+```
+
+This separation keeps provenance explicit: use `telemetry_convert_column(tagged_column, to)` when the reader knows the unit, and `telemetry_convert(value, from, to)` for ordinary scalar expressions.
+
 Use `telemetry_can_convert(from, to)` when you want a boolean instead of an error, for example to convert a column only where it is meaningful:
 
 ```sql
@@ -374,6 +399,24 @@ SELECT * FROM write_telemetry('run.pds', 'run.ld');
 The writer is lossless or it refuses. Sample values keep their full precision — float64 channels are written as float64, and `u16`/`u32` widen rather than truncate — so a PDS round-trips through LD bit-for-bit. Rather than silently degrading a recording, it returns an error when a file cannot be represented: mixed sample rates in one output, non-contiguous chunks, non-integer frequencies, or channel names and units too long for LD's fixed-width fields.
 
 The LDX records supplied session metadata and recovers beacon markers from dedicated lap-trigger channels when available, falling back to an increasing lap counter. It also writes total laps and the fastest complete beacon-to-beacon lap. Unknown metadata remains empty, and no lap markers are invented when the source has no reliable signal.
+
+For a projected export, `channel_mapping` takes ordinary SQL nested lists. Each row is `[source, target name, target unit]`; the unit registry derives the complete affine conversion, including temperature offsets. `sum_channels` rows are `[left source, right source, target name, target unit]` and require identical source clocks and units:
+
+```sql
+SELECT * FROM write_telemetry('run.pds', 'sim-compatible.ld',
+    channel_mapping := [
+        ['Speed_Ref',  'Ground Speed',     'm/s'],
+        ['RPM',        'Engine RPM',       'rpm'],
+        ['P_F_BRAKE',  'Brake Pressure F', 'psi'],
+        ['T_Brake_FL', 'Brake Temp FL',    '°C']
+    ],
+    sum_channels := [
+        ['X_FL_DAMPER', 'X_FR_DAMPER', 'Damper Travel HF', 'mm']
+    ]
+);
+```
+
+This is SQL data rather than the optional channel-map mini-language, and no conversion constants are duplicated in the query. When either projection list is present, only declared output channels are written. See [`scripts/pds_to_sim_motec.sql`](scripts/pds_to_sim_motec.sql) for a complete environment-parameterized conversion.
 
 Optional metadata named arguments: `driver`, `vehicle`, `vehicle_number`, `team`, `venue`, `event`, `session`, `comment`, `date`, `time`.
 

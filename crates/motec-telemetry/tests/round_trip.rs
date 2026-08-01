@@ -247,6 +247,22 @@ fn every_sample_type_round_trips_at_full_precision() {
 }
 
 #[test]
+fn latin1_units_round_trip() {
+    let source = source_from(vec![single_chunk(
+        1,
+        "Brake Temp FL",
+        "°C",
+        SampleType::F64,
+        20,
+        vec![100.0, 200.0],
+    )]);
+    let bytes = write_motec_bytes(&source, &MotecMetadata::default()).unwrap();
+    let written = MotecFile::from_bytes("temperature.ld", bytes).unwrap();
+    assert_eq!(written.channels()[0].unit, "°C");
+    assert_lossless(&source, &written);
+}
+
+#[test]
 fn multi_chunk_channels_flatten_without_losing_samples() {
     // Three contiguous chunks at 50 Hz, as produced by an interrupted log.
     let period = 20_000_000u64;
