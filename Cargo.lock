@@ -43,6 +43,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-telemetry"
+version = "0.6.1"
+dependencies = [
+ "memmap2",
+ "motorsport-telemetry-core",
+ "thiserror",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -581,6 +590,7 @@ dependencies = [
 name = "duckdb-motorsport-telemetry"
 version = "0.6.1"
 dependencies = [
+ "aim-telemetry",
  "chrono",
  "cosworth-telemetry",
  "duckdb",

@@ -288,7 +288,7 @@ pub fn column_comment_ddl(table: &str, columns: &[(String, String, UnitSource)])
 }
 
 /// Quote a table and column name for SQL, handling embedded quotes.
-fn quote_qualified(table: &str, column: &str) -> String {
+pub(crate) fn quote_qualified(table: &str, column: &str) -> String {
     // The table may already be schema-qualified, so quote each part.
     let table = table
         .split('.')
@@ -299,7 +299,7 @@ fn quote_qualified(table: &str, column: &str) -> String {
 }
 
 /// Escape a single-quoted SQL string literal.
-fn escape_literal(value: &str) -> String {
+pub(crate) fn escape_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 

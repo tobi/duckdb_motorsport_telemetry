@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "DuckDB extension for PDS, MoTeC LD, and VBOX VBO telemetry"
+description = "DuckDB extension for AiM MP4, PDS, MoTeC LD, and VBOX VBO telemetry"
 
 [lib]
 name = "motorsport_telemetry"
@@ -22,3 +22,6 @@ duckdb-loadable-macros = "=1.10504.0"
 glob = "0.3"
 libduckdb-sys = { version = "=1.10504.0", features = ["loadable-extension"] }
 thiserror.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+aim-telemetry.workspace = true

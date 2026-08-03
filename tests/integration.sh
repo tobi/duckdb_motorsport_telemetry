@@ -106,9 +106,10 @@ SELECT CASE WHEN (SELECT DISTINCT [channel, unit, unit_source] FROM telemetry_sa
 SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$fixture', channel='Speed', channel_map='Throttle -> Pedal [%] *0.01')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('unmapped channel was modified') END;
 -- column comment DDL is generated and correctly quoted
 SELECT CASE WHEN (SELECT count(*) FROM telemetry_column_comments('$motec_fixture', 'laps')) > 0 THEN true ELSE error('no column comments generated') END;
-SELECT CASE WHEN (SELECT ddl FROM telemetry_column_comments('$motec_fixture', 'laps') WHERE column_name='Speed') LIKE 'COMMENT ON COLUMN %laps%.%Speed% IS ''unit=%' THEN true ELSE error('column comment DDL malformed') END;"
+SELECT CASE WHEN (SELECT ddl FROM telemetry_column_comments('$motec_fixture', 'laps') WHERE column_name='Speed') LIKE 'COMMENT ON COLUMN %laps%.%Speed% IS ''unit=%' THEN true ELSE error('column comment DDL malformed') END;
+SELECT CASE WHEN (SELECT kv_metadata FROM telemetry_column_comments('$fixture', 'laps') WHERE column_name='Throttle') LIKE '%native_frequency_hz=1; native_sample_period_ns=1000000000' THEN true ELSE error('native sample rate missing from column metadata') END;"
 results="$("$DUCKDB" -unsigned -csv -noheader -c "$sql")"
-[[ "$(grep -c '^true$' <<<"$results")" = 34 ]]
+[[ "$(grep -c '^true$' <<<"$results")" = 35 ]]
 
 # Inferred conversion is intentionally restricted to direct unit-tagged reader
 # columns. Scalars and expressions must use telemetry_convert(value, from, to).

@@ -1,6 +1,8 @@
 pub mod channel_map;
 mod unit_sql;
 
+#[cfg(not(target_os = "emscripten"))]
+use aim_telemetry::AimFile;
 use channel_map::ChannelMap;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use cosworth_telemetry::CosworthFile;
@@ -208,7 +210,7 @@ fn expand_paths(pattern: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
                     .and_then(|value| value.to_str())
                     .map(str::to_ascii_lowercase)
                     .as_deref(),
-                Some("pds" | "ld" | "vbo")
+                Some("pds" | "ld" | "vbo" | "mp4")
             )
         });
     }
@@ -346,6 +348,7 @@ fn open_paths(
             "pds" => "pds",
             "ld" => "motec",
             "vbo" => "vbo",
+            "mp4" => "aimd",
             _ => continue,
         };
         if required_format.is_some_and(|required| required != format) {
@@ -362,6 +365,7 @@ fn open_paths(
             "pds" => Arc::new(CosworthFile::open(&path)?),
             "motec" => Arc::new(MotecFile::open(&path)?),
             "vbo" => Arc::new(VboFile::open(&path)?),
+            "aimd" => Arc::new(AimFile::open(&path)?),
             _ => unreachable!(),
         };
         #[cfg(target_os = "emscripten")]
@@ -372,6 +376,7 @@ fn open_paths(
                 "pds" => Arc::new(CosworthFile::from_bytes(display, bytes)?) as SourceRef,
                 "motec" => Arc::new(MotecFile::from_bytes(display, bytes)?) as SourceRef,
                 "vbo" => Arc::new(VboFile::from_bytes(display, bytes)?) as SourceRef,
+                "aimd" => return Err("AiM MP4 is not supported in the WebAssembly build".into()),
                 _ => unreachable!(),
             }
         };
@@ -1244,7 +1249,7 @@ impl VTab for CommentsVTab {
         // Deduplicate by column name: the same channel can appear in several
         // files of a glob, and a table has one column per name.
         let mut seen = HashSet::new();
-        let mut columns: Vec<(String, String, UnitSource)> = Vec::new();
+        let mut columns: Vec<(String, String, UnitSource, f64, u64)> = Vec::new();
         for file in &files {
             for channel in file.channels() {
                 let column = map.name_for(&channel.name).to_owned();
@@ -1258,19 +1263,36 @@ impl VTab for CommentsVTab {
                 }
                 let (unit, source) =
                     map.unit_for(&channel.name, &channel.unit, channel.unit_source);
-                if unit.is_empty() || !seen.insert(column.clone()) {
+                if !seen.insert(column.clone()) {
                     continue;
                 }
-                columns.push((column, unit, source));
+                columns.push((
+                    column,
+                    unit,
+                    source,
+                    channel.frequency_hz().unwrap_or(0.0),
+                    channel.first_period_ns().unwrap_or(0),
+                ));
             }
         }
 
-        let statements = channel_map::column_comment_ddl(&table, &columns)
+        let statements = columns
             .into_iter()
-            .zip(columns)
-            .map(|(ddl, (column, unit, source))| {
-                let payload = channel_map::unit_payload(&unit, source);
-                let rule = format!("{column} -> {column} [{unit}]");
+            .map(|(column, unit, source, frequency_hz, sample_period_ns)| {
+                let mut payload = channel_map::unit_payload(&unit, source);
+                payload.push_str(&format!(
+                    "; native_frequency_hz={frequency_hz}; native_sample_period_ns={sample_period_ns}"
+                ));
+                let ddl = format!(
+                    "COMMENT ON COLUMN {} IS '{}';",
+                    channel_map::quote_qualified(&table, &column),
+                    channel_map::escape_literal(&payload)
+                );
+                let rule = if unit.is_empty() {
+                    String::new()
+                } else {
+                    format!("{column} -> {column} [{unit}]")
+                };
                 (column, unit, ddl, payload, rule)
             })
             .collect::<Vec<_>>();
@@ -1725,6 +1747,18 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_telemetry",
         &ReaderConfig { format: None },
+    )?;
+    con.register_table_function_with_extra_info::<WideVTab, _>(
+        "read_aim",
+        &ReaderConfig {
+            format: Some("aimd"),
+        },
+    )?;
+    con.register_table_function_with_extra_info::<WideVTab, _>(
+        "read_aimd",
+        &ReaderConfig {
+            format: Some("aimd"),
+        },
     )?;
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_cosworth",

@@ -4,6 +4,7 @@
 
 A fast, vectorized DuckDB extension and reusable Rust parser workspace for:
 
+- AiM Sports embedded **aimd** telemetry (`.mp4`)
 - Pi Research / Cosworth **PDS** (`.pds`)
 - MoTeC i2 **LD** (`.ld`)
 - Racelogic VBOX **VBO** (`.vbo`)
@@ -69,7 +70,7 @@ The browser smoke test generates synthetic PDS, MoTeC, and VBO files at runtime,
 ```sql
 LOAD motorsport_telemetry;
 
--- Discover channels and native rates.
+-- Discover channels and native rates. MP4 is accepted when it contains aimd.
 SELECT format, name, unit, frequency_hz, sample_count
 FROM telemetry_metadata('run.pds')
 WHERE sample_count > 0
@@ -88,6 +89,25 @@ FROM read_telemetry(
     channels := 'Speed_Ref,I_ACCEL_LONG,gear_pos'
 );
 ```
+
+### AiM video telemetry
+
+AiM SmartyCam-style MP4 recordings are queried directly; no FFmpeg extraction step is required:
+
+```sql
+SELECT name, data_type, frequency_hz, sample_count
+FROM telemetry_metadata('session.mp4')
+WHERE sample_count > 0;
+
+SELECT time_ns / 1e9 AS seconds, value
+FROM telemetry_samples('session.mp4', channel := 'RPM')
+ORDER BY time_ns;
+
+SELECT *
+FROM read_aim('session.mp4', channels := 'RPM,Speed_Wspd_App', rate := 10);
+```
+
+The native reader memory-maps the MP4 and follows its ISO-BMFF sample tables, so the video and audio payloads are neither loaded into memory nor decoded. It identifies the data track by the `aimd` sample-entry FourCC and fails immediately when an MP4 has no such track. Channel names, record IDs and widths come from the embedded AiM `CHS` definitions rather than a firmware-specific fixed layout. Aggregate records such as `GPS0` and `LapPk` are not flattened until their nested schema is known; unknown units remain explicitly `unknown` rather than being guessed.
 
 ## Functions
 
@@ -473,7 +493,7 @@ DuckDB cannot attach comments to a table function's result columns, so unit meta
 | Column | Use |
 |---|---|
 | `ddl` | `COMMENT ON COLUMN` statement for a materialised table |
-| `kv_metadata` | Payload for Parquet `KV_METADATA`, which survives export |
+| `kv_metadata` | Unit plus `native_frequency_hz` and `native_sample_period_ns`, suitable for Parquet `KV_METADATA` |
 | `channel_map_rule` | The `channel_map` rule reproducing this column's unit |
 
 Two carriers are needed because neither alone covers every path out of DuckDB. Column comments live in the catalog and are queryable via `duckdb_columns()`, but **`COPY ... TO 'x.parquet'` drops them**. Parquet `KV_METADATA` travels with the file to other tools, but cannot annotate a DuckDB table.
@@ -482,13 +502,13 @@ The payload is self-describing, so a downstream reader can normalise and dimensi
 
 ```sql
 SELECT column_name, kv_metadata
-FROM telemetry_column_comments('run.pds', 'laps') WHERE unit <> '';
+FROM telemetry_column_comments('run.pds', 'laps');
 ```
 
 ```text
 ┌──────────────────┬──────────────────────────────────────────────────────────────────────────┐
-│ Alt_RPM          │ unit=rad/s; source=declared; dimension=angular_velocity; base_unit=rad/s │
-│ System Time High │ unit=sec; source=declared; canonical=s; dimension=time; base_unit=s      │
+│ Alt_RPM          │ unit=rad/s; source=declared; dimension=angular_velocity; base_unit=rad/s; native_frequency_hz=100; native_sample_period_ns=10000000 │
+│ DriverID         │ unit=; source=unknown; native_frequency_hz=10; native_sample_period_ns=100000000                                                       │
 └──────────────────┴──────────────────────────────────────────────────────────────────────────┘
 ```
 
