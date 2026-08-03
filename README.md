@@ -107,7 +107,7 @@ SELECT *
 FROM read_aim('session.mp4', channels := 'RPM,Speed_Wspd_App', rate := 10);
 ```
 
-The native reader memory-maps the MP4 and follows its ISO-BMFF sample tables, so the video and audio payloads are neither loaded into memory nor decoded. It identifies the data track by the `aimd` sample-entry FourCC and fails immediately when an MP4 has no such track. Channel names, record IDs and widths come from the embedded AiM `CHS` definitions rather than a firmware-specific fixed layout. Aggregate records such as `GPS0` and `LapPk` are not flattened until their nested schema is known; unknown units remain explicitly `unknown` rather than being guessed.
+The native reader memory-maps the MP4 and follows its ISO-BMFF sample tables, so the video and audio payloads are neither loaded into memory nor decoded. It identifies the data track by the `aimd` sample-entry FourCC and fails immediately when an MP4 has no such track. Channel names, record IDs and widths come from the embedded AiM `CHS` definitions rather than a firmware-specific fixed layout. The 56-byte `GPS0` aggregate is decoded into 25 Hz geodetic position, velocity, heading, accuracy, satellite, GPS-time and status channels. `LapPk` is not fabricated: five inspected recordings define it but contain no payload, while their lap number and timing arrive as scalar channels. Unknown units remain explicitly `unknown` rather than being guessed.
 
 ## Functions
 

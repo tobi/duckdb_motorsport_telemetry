@@ -61,9 +61,28 @@ The record ID is joined to the `CHS` schema. Timestamps are normalized to the fi
 
 Widths of one and four bytes are currently exposed. One-byte records are unsigned status values. Four-byte ordinary channels use IEEE-754 little-endian values. Schema class `0x1003` selects an unsigned protocol clock, while encoding kind `12` selects signed integer timer ticks. These choices come from `CHS` fields rather than channel names.
 
-## Aggregate records
+## GPS aggregate
 
-`LapPk` (20 bytes) and `GPS0` (56 bytes in the examined recording) are tagged aggregate structures rather than scalar `(S … )` records. They are deliberately omitted until their nested fields can be identified from schema data or an authoritative specification. The reader does not manufacture scalar GPS channels from fixed offsets.
+AiM's [GPS09c product documentation](https://www.aim-sportline.com/en/products/gps09c/index.htm) identifies its GPS channels and states that they are available at 25 Hz. Each observed `GPS0` definition declares a width of 56 bytes, and data arrives in `<hGPS>` blocks of that declared width.
+
+| GPS payload offset | Encoding | Export | Unit |
+|---:|---|---|---|
+| 0 | `u32le` | logger timestamp | ms |
+| 4 | `u32le` | GPS iTOW | ms |
+| 12 | `u16le` | GPS week | count |
+| 16, 20, 24 | `i32le` | ECEF X/Y/Z position | cm |
+| 28 | `u32le` | position accuracy | cm |
+| 32, 36, 40 | `i32le` | ECEF X/Y/Z velocity | cm/s |
+| 44 | `u32le` | speed accuracy | cm/s |
+| 48, high byte | `u8` | satellite count | count |
+| 48, low 24 bits | unsigned | dilution of precision | 0.01 ratio |
+| 52 | `u32le` | fix/status flags | raw |
+
+The reader converts ECEF position to WGS84 latitude, longitude and ellipsoid altitude, and ECEF velocity to speed and true heading. The first packet resolves to `43.797816°, -87.989895°, 291.74 m`, at Road America. Velocity magnitude reaches `72.46 m/s` and agrees with the independent wheel-speed channel after converting that channel from km/h. These checks are included to distinguish decoded fields from plausible-looking guesses.
+
+## Lap packet
+
+`LapPk` declares a 20-byte aggregate width. All five available recordings contain the definition but zero `LapPk` data blocks or scalar records. Their useful lap information is instead recorded through `Lap_Number_001`, `Current_Lap_Time`, `Delta_Lap_Time`, `Previous_LT` and `Ref_Lap_Time`. No 20-byte layout is claimed without a real payload.
 
 ## Compatibility policy
 
@@ -71,4 +90,4 @@ Widths of one and four bytes are currently exposed. One-byte records are unsigne
 - Do not depend on the observed 40-channel order or on MP4 track 3.
 - Accept additional unknown tagged blocks.
 - Reject malformed sample tables, out-of-file offsets, missing `amv0` packet signatures, duplicate record IDs, and MP4 files without an `aimd` sample entry.
-- Leave units unknown until they can be decoded reliably from the schema.
+- Assign units to GPS fields only where the payload scale is validated; leave ordinary scalar units unknown until their CHS quantity codes are decoded reliably.

@@ -261,6 +261,27 @@ enum Representation {
     I32,
     U32,
     F32,
+    GpsLatitude,
+    GpsLongitude,
+    GpsAltitude,
+    GpsSpeed,
+    GpsHeading,
+    GpsSatellites,
+    GpsPositionAccuracy,
+    GpsSpeedAccuracy,
+    GpsVelocityX,
+    GpsVelocityY,
+    GpsVelocityZ,
+    GpsItow,
+    GpsWeek,
+    GpsDop,
+    GpsFixFlags,
+}
+
+impl Representation {
+    fn is_gps(self) -> bool {
+        !matches!(self, Self::U8 | Self::I32 | Self::U32 | Self::F32)
+    }
 }
 
 /// An AiM telemetry stream embedded in an MP4 recording.
@@ -296,19 +317,95 @@ fn tagged_blocks(sample: &[u8], tag: [u8; 3]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
+fn gps_channel(
+    id: u32,
+    name: &str,
+    unit: &str,
+    sample_type: SampleType,
+    representation: Representation,
+) -> (Channel, AimChannel) {
+    (
+        Channel {
+            id,
+            name: name.into(),
+            unit: unit.into(),
+            unit_source: UnitSource::SpecDefault,
+            sample_type,
+            chunks: Vec::new(),
+            sample_count: 0,
+            duration_ns: 0,
+        },
+        AimChannel {
+            record_id: u16::MAX,
+            width: 56,
+            representation,
+            samples: Vec::new(),
+        },
+    )
+}
+
+fn gps_channels(first_id: u32) -> Vec<(Channel, AimChannel)> {
+    use Representation::*;
+    [
+        ("GPS Latitude", "deg", SampleType::F64, GpsLatitude),
+        ("GPS Longitude", "deg", SampleType::F64, GpsLongitude),
+        ("GPS Altitude", "m", SampleType::F64, GpsAltitude),
+        ("GPS Speed", "m/s", SampleType::F64, GpsSpeed),
+        ("GPS Heading", "deg", SampleType::F64, GpsHeading),
+        ("GPS Satellites", "count", SampleType::U8, GpsSatellites),
+        (
+            "GPS Position Accuracy",
+            "m",
+            SampleType::F64,
+            GpsPositionAccuracy,
+        ),
+        (
+            "GPS Speed Accuracy",
+            "m/s",
+            SampleType::F64,
+            GpsSpeedAccuracy,
+        ),
+        ("GPS ECEF Velocity X", "m/s", SampleType::F64, GpsVelocityX),
+        ("GPS ECEF Velocity Y", "m/s", SampleType::F64, GpsVelocityY),
+        ("GPS ECEF Velocity Z", "m/s", SampleType::F64, GpsVelocityZ),
+        ("GPS iTOW", "ms", SampleType::U32, GpsItow),
+        ("GPS Week", "count", SampleType::U16, GpsWeek),
+        ("GPS DOP", "ratio", SampleType::F64, GpsDop),
+        ("GPS Fix Flags", "raw", SampleType::U32, GpsFixFlags),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (name, unit, sample_type, representation))| {
+        gps_channel(
+            first_id + index as u32,
+            name,
+            unit,
+            sample_type,
+            representation,
+        )
+    })
+    .collect()
+}
+
 fn schema(sample: &[u8], path: &str) -> Result<Vec<(Channel, AimChannel)>, AimError> {
     if sample.get(6..10) != Some(b"amv0") {
         return Err(invalid(path, "first aimd sample has no amv0 signature"));
     }
     let mut result = Vec::new();
     let mut seen = HashMap::new();
+    let mut gps_record = None;
     for payload in tagged_blocks(sample, *b"CHS") {
         if payload.len() < 100 {
             continue;
         }
         let record_id = le32(payload, 0).unwrap_or(u32::MAX);
         let width = le32(payload, 72).unwrap_or(0) as usize;
+        let code = c_string(&payload[24..32]);
         let name = c_string(&payload[32..64]);
+        if code == "GPS0" && width == 56 {
+            gps_record = Some(record_id);
+            continue;
+        }
         if record_id > u16::MAX as u32 || name.is_empty() || !matches!(width, 1 | 4) {
             continue;
         }
@@ -338,6 +435,7 @@ fn schema(sample: &[u8], path: &str) -> Result<Vec<(Channel, AimChannel)>, AimEr
             Representation::I32 => SampleType::I32,
             Representation::U32 => SampleType::U32,
             Representation::F32 => SampleType::F32,
+            _ => unreachable!("GPS representations are added after CHS scalar parsing"),
         };
         let channel = Channel {
             id: record_id,
@@ -358,6 +456,9 @@ fn schema(sample: &[u8], path: &str) -> Result<Vec<(Channel, AimChannel)>, AimEr
                 samples: Vec::new(),
             },
         ));
+    }
+    if let Some(record_id) = gps_record {
+        result.extend(gps_channels(record_id.saturating_add(1)));
     }
     if result.is_empty() {
         return Err(invalid(
@@ -454,8 +555,15 @@ impl AimFile {
         let by_record = aim_channels
             .iter()
             .enumerate()
+            .filter(|(_, channel)| !channel.representation.is_gps())
             .map(|(i, channel)| (channel.record_id, i))
             .collect::<HashMap<_, _>>();
+        let gps_indices = aim_channels
+            .iter()
+            .enumerate()
+            .filter(|(_, channel)| channel.representation.is_gps())
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
 
         for &(offset, size, _) in track.samples.iter().skip(1) {
             let packet = &data[offset as usize..offset as usize + size as usize];
@@ -493,6 +601,27 @@ impl AimFile {
                     time_ns: timestamp as u64 * 1_000_000,
                 });
                 at = value + width + 1;
+            }
+
+            let mut gps_at = 10usize;
+            while let Some(relative) = packet
+                .get(gps_at..)
+                .and_then(|tail| tail.windows(5).position(|window| window == b"<hGPS"))
+            {
+                let header = gps_at + relative;
+                let size = le32(packet, header + 6).unwrap_or(0) as usize;
+                let payload = header + 12;
+                let end = payload.saturating_add(size);
+                if size == 56 && end <= packet.len() {
+                    let timestamp = le32(packet, payload).unwrap_or(0);
+                    for &index in &gps_indices {
+                        aim_channels[index].samples.push(SampleRef {
+                            value_offset: offset + payload as u64,
+                            time_ns: timestamp as u64 * 1_000_000,
+                        });
+                    }
+                }
+                gps_at = end.max(header + 5);
             }
         }
         if aim_channels
@@ -533,6 +662,55 @@ impl AimFile {
     }
 }
 
+fn gps_i32(data: &[u8], offset: usize) -> i32 {
+    i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+}
+
+fn gps_u32(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+}
+
+fn ecef_position(data: &[u8]) -> (f64, f64, f64) {
+    let x = gps_i32(data, 16) as f64 / 100.0;
+    let y = gps_i32(data, 20) as f64 / 100.0;
+    let z = gps_i32(data, 24) as f64 / 100.0;
+    let a = 6_378_137.0_f64;
+    let e2 = 6.694_379_990_14e-3_f64;
+    let longitude = y.atan2(x);
+    let p = x.hypot(y);
+    let mut latitude = z.atan2(p * (1.0 - e2));
+    let mut altitude = 0.0;
+    for _ in 0..8 {
+        let n = a / (1.0 - e2 * latitude.sin().powi(2)).sqrt();
+        altitude = p / latitude.cos() - n;
+        latitude = z.atan2(p * (1.0 - e2 * n / (n + altitude)));
+    }
+    (latitude.to_degrees(), longitude.to_degrees(), altitude)
+}
+
+fn gps_velocity(data: &[u8]) -> (f64, f64, f64) {
+    (
+        gps_i32(data, 32) as f64 / 100.0,
+        gps_i32(data, 36) as f64 / 100.0,
+        gps_i32(data, 40) as f64 / 100.0,
+    )
+}
+
+fn gps_heading(data: &[u8]) -> f64 {
+    let (latitude, longitude, _) = ecef_position(data);
+    let latitude = latitude.to_radians();
+    let longitude = longitude.to_radians();
+    let (vx, vy, vz) = gps_velocity(data);
+    let east = -longitude.sin() * vx + longitude.cos() * vy;
+    let north = -latitude.sin() * longitude.cos() * vx - latitude.sin() * longitude.sin() * vy
+        + latitude.cos() * vz;
+    if east.hypot(north) < 0.01 {
+        0.0
+    } else {
+        east.atan2(north).to_degrees().rem_euclid(360.0)
+    }
+}
+
 impl TelemetrySource for AimFile {
     fn path(&self) -> &str {
         &self.path
@@ -559,6 +737,28 @@ impl TelemetrySource for AimFile {
             Representation::F32 => {
                 f32::from_le_bytes(self.data[at..at + 4].try_into().unwrap()) as f64
             }
+            Representation::GpsLatitude => ecef_position(&self.data[at..at + 56]).0,
+            Representation::GpsLongitude => ecef_position(&self.data[at..at + 56]).1,
+            Representation::GpsAltitude => ecef_position(&self.data[at..at + 56]).2,
+            Representation::GpsSpeed => {
+                let (x, y, z) = gps_velocity(&self.data[at..at + 56]);
+                x.hypot(y).hypot(z)
+            }
+            Representation::GpsHeading => gps_heading(&self.data[at..at + 56]),
+            Representation::GpsSatellites => (gps_u32(&self.data[at..at + 56], 48) >> 24) as f64,
+            Representation::GpsPositionAccuracy => {
+                gps_u32(&self.data[at..at + 56], 28) as f64 / 100.0
+            }
+            Representation::GpsSpeedAccuracy => gps_u32(&self.data[at..at + 56], 44) as f64 / 100.0,
+            Representation::GpsVelocityX => gps_velocity(&self.data[at..at + 56]).0,
+            Representation::GpsVelocityY => gps_velocity(&self.data[at..at + 56]).1,
+            Representation::GpsVelocityZ => gps_velocity(&self.data[at..at + 56]).2,
+            Representation::GpsItow => gps_u32(&self.data[at..at + 56], 4) as f64,
+            Representation::GpsWeek => le16(&self.data[at..at + 56], 12).unwrap() as f64,
+            Representation::GpsDop => {
+                (gps_u32(&self.data[at..at + 56], 48) & 0x00ff_ffff) as f64 / 100.0
+            }
+            Representation::GpsFixFlags => gps_u32(&self.data[at..at + 56], 52) as f64,
         }
     }
 }
@@ -593,6 +793,15 @@ mod tests {
         schema.extend_from_slice(&(definition.len() as u32).to_le_bytes());
         schema.extend_from_slice(&[1, b'>']);
         schema.extend_from_slice(&definition);
+        let mut gps_definition = vec![0; 112];
+        gps_definition[0..4].copy_from_slice(&55u32.to_le_bytes());
+        gps_definition[24..28].copy_from_slice(b"GPS0");
+        gps_definition[32..36].copy_from_slice(b"GPS0");
+        gps_definition[72..76].copy_from_slice(&56u32.to_le_bytes());
+        schema.extend_from_slice(b"<hCHS\0");
+        schema.extend_from_slice(&(gps_definition.len() as u32).to_le_bytes());
+        schema.extend_from_slice(&[1, b'>']);
+        schema.extend_from_slice(&gps_definition);
         let size = schema.len() - 2;
         schema[0..2].copy_from_slice(&(size as u16).to_be_bytes());
 
@@ -603,6 +812,24 @@ mod tests {
         values.extend_from_slice(&42u16.to_le_bytes());
         values.extend_from_slice(&1234.5f32.to_le_bytes());
         values.push(b')');
+        let mut gps = vec![0; 56];
+        gps[0..4].copy_from_slice(&100u32.to_le_bytes());
+        gps[4..8].copy_from_slice(&573_634_560u32.to_le_bytes());
+        gps[12..14].copy_from_slice(&2429u16.to_le_bytes());
+        gps[16..20].copy_from_slice(&16_174_352i32.to_le_bytes());
+        gps[20..24].copy_from_slice(&(-460_842_617i32).to_le_bytes());
+        gps[24..28].copy_from_slice(&439_210_627i32.to_le_bytes());
+        gps[28..32].copy_from_slice(&783u32.to_le_bytes());
+        gps[32..36].copy_from_slice(&5i32.to_le_bytes());
+        gps[36..40].copy_from_slice(&(-10i32).to_le_bytes());
+        gps[40..44].copy_from_slice(&8i32.to_le_bytes());
+        gps[44..48].copy_from_slice(&6u32.to_le_bytes());
+        gps[48..52].copy_from_slice(&0x0900_00f8u32.to_le_bytes());
+        gps[52..56].copy_from_slice(&4096u32.to_le_bytes());
+        values.extend_from_slice(b"<hGPS\0");
+        values.extend_from_slice(&(gps.len() as u32).to_le_bytes());
+        values.extend_from_slice(&[1, b'>']);
+        values.extend_from_slice(&gps);
         let size = values.len() - 2;
         values[0..2].copy_from_slice(&(size as u16).to_be_bytes());
         (schema, values)
@@ -697,6 +924,30 @@ mod tests {
         assert_eq!(file.channels[0].name, "RPM");
         assert_eq!(file.channels[0].sample_count, 1);
         assert_eq!(file.decode(0, 0, 0), 1234.5);
+        let latitude = file
+            .channels
+            .iter()
+            .position(|channel| channel.name == "GPS Latitude")
+            .unwrap();
+        let longitude = file
+            .channels
+            .iter()
+            .position(|channel| channel.name == "GPS Longitude")
+            .unwrap();
+        assert!((file.decode(latitude, 0, 0) - 43.797_816).abs() < 1e-6);
+        assert!((file.decode(longitude, 0, 0) + 87.989_895).abs() < 1e-6);
+        let speed = file
+            .channels
+            .iter()
+            .position(|channel| channel.name == "GPS Speed")
+            .unwrap();
+        let satellites = file
+            .channels
+            .iter()
+            .position(|channel| channel.name == "GPS Satellites")
+            .unwrap();
+        assert!((file.decode(speed, 0, 0) - 0.137_477).abs() < 1e-6);
+        assert_eq!(file.decode(satellites, 0, 0), 9.0);
         std::fs::write(&path, fixture_mp4(false)).unwrap();
         assert!(matches!(
             AimFile::open(&path),

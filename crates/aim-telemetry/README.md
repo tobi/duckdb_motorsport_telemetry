@@ -14,7 +14,7 @@ Native reader for AiM Sports telemetry stored as an `aimd` track inside an ISO B
 
 See [`FORMAT.md`](FORMAT.md) for the documented MP4 tables, packet framing, `CHS` schema fields, scalar record layout, and compatibility policy.
 
-The parser intentionally does not guess how to flatten aggregate AiM records such as `GPS0` and `LapPk` into scalar channels. Scalar channels without a safely decoded unit remain unitless with `unit_source = unknown`.
+`GPS0` is decoded into geodetic position, speed, heading, accuracy, satellite, timing and status channels at its native 25 Hz. `LapPk` remains unexpanded: it is defined but has no payload in any of the five available recordings, while lap number and lap timing are carried by ordinary scalar channels. Scalar channels without a safely decoded unit remain unitless with `unit_source = unknown`.
 
 ```rust
 use aim_telemetry::AimFile;
