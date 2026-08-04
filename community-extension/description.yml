@@ -1,7 +1,7 @@
 extension:
   name: motorsport_telemetry
-  description: Query Cosworth PDS, MoTeC LD, and Racelogic VBOX telemetry directly in DuckDB
-  version: 0.6.1
+  description: Query AiM MP4, Cosworth PDS, MoTeC LD, and Racelogic VBOX telemetry directly in DuckDB
+  version: 0.7.0
   language: Rust
   build: cargo
   license: MIT
@@ -12,7 +12,7 @@ extension:
 
 repo:
   github: tobi/duckdb_motorsport_telemetry
-  ref: 8cc06a597e33e7558be759cbffa44f2a2e1baa49
+  ref: 1bfb9acaaaf4bbd2ca0743bf717f7ac3d5ac8601
 
 docs:
   hello_world: |
@@ -25,10 +25,11 @@ docs:
       rate := 100,
       channels := 'Ground Speed,Throttle Pos,Brake Pedal Pos');
   extended_description: |
-    `motorsport_telemetry` reads Pi Research/Cosworth PDS, MoTeC i2 LD, and
-    Racelogic VBOX VBO telemetry without an export step. It provides exact
-    channel metadata, native-rate long-form samples, and projected wide readers
-    with time/channel pruning and type-aware interpolation. Integer and event
-    channels always use previous-value semantics; only floating-point channels
-    can interpolate linearly. The parsers memory-map native files and table
-    functions produce vectorized DuckDB output.
+    `motorsport_telemetry` reads AiM `aimd` telemetry embedded in MP4, Pi
+    Research/Cosworth PDS, MoTeC i2 LD, and Racelogic VBOX VBO files without an
+    export step. It provides exact channel metadata, native-rate long-form
+    samples, and projected wide readers with time/channel pruning and
+    type-aware interpolation. Integer and event channels always use
+    previous-value semantics; only floating-point channels can interpolate
+    linearly. The parsers memory-map native files and table functions produce
+    vectorized DuckDB output.

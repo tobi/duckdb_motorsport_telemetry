@@ -23,17 +23,20 @@ DuckDB no longer needs `-unsigned`, `httpfs`, or this project's custom repositor
 - `test/sql/registration.test` verifies that a signed-style build loads and exposes all six table functions without shipping proprietary telemetry.
 - Parser and integration tests continue to generate all telemetry fixtures at runtime.
 
-The standalone custom repository remains useful for historical versions and DuckDB-Wasm, because the Community Extension repository exposes only the descriptor's currently pinned source revision and does not publish WASM builds.
+The prepared descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools. The standalone custom repository remains useful for the project's separate DuckDB-Wasm build and historical versions.
 
-## Submitted descriptor
+## Prepared descriptor
 
-The submitted descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
-`0.6.1` at commit `8cc06a597e33e7558be759cbffa44f2a2e1baa49` (tag `v0.6.1`) and excludes DuckDB-Wasm, musl, MinGW, and
+The v0.7.0 descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
+`0.7.0` at commit `1bfb9acaaaf4bbd2ca0743bf717f7ac3d5ac8601` (tag `v0.7.0`) and excludes DuckDB-Wasm, musl, MinGW, and
 RTools; native Linux, macOS, and Windows MSVC are enabled.
 
-The upstream pull request adds that file as `extensions/motorsport_telemetry/description.yml` in
-`duckdb/community-extensions`. Remaining work is to answer review comments and fix any platform build failures reported
-by the upstream matrix.
+The prior upstream pull request, [#2363](https://github.com/duckdb/community-extensions/pull/2363), published version
+`0.6.1`. The v0.7.0 descriptor is ready for a follow-up pull request that adds
+`extensions/motorsport_telemetry/description.yml` with the new source ref.
+
+Remaining work is to run the upstream matrix, open the follow-up pull request, and answer any review comments or platform
+build failures it reports.
 
 To submit a later revision:
 

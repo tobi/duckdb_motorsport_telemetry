@@ -672,7 +672,7 @@ con.execute("LOAD motorsport_telemetry")
 print(con.sql("SELECT * FROM telemetry_metadata('run.vbo')"))
 ```
 
-The Community Extension is published from [upstream PR #2363](https://github.com/duckdb/community-extensions/pull/2363). The release path remains useful for offline installs and historical versions; this descriptor currently excludes DuckDB-Wasm, musl, MinGW, and RTools, while the project's standalone repository remains the path for its separate DuckDB-Wasm build.
+The signed Community Extension was first published via [upstream PR #2363](https://github.com/duckdb/community-extensions/pull/2363). The v0.7.0 descriptor is prepared in [`community-extension/description.yml`](community-extension/description.yml) for a follow-up PR; the release path remains useful for offline installs and historical versions, while this descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools and the standalone repository remains the path for the separate DuckDB-Wasm build.
 
 ## Build from source
 
