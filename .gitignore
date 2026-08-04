@@ -9,8 +9,8 @@
 /web/dist/
 /web/public/
 
-# Telemetry data is private and often large. Test fixtures are generated at
-# run time (see tests/), so no real log should ever be committed.
+# Telemetry data is private and often large. The checked-in fixtures are small,
+# deterministic synthetic files; real telemetry logs must never be committed.
 *.pds
 *.ld
 *.ldx
