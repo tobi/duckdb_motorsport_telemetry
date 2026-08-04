@@ -8,135 +8,14 @@ fixture="$fixture_dir/synthetic.pds"
 motec_fixture="$fixture_dir/synthetic.ld"
 vbo_fixture="$fixture_dir/synthetic.vbo"
 aim_fixture="$fixture_dir/synthetic.mp4"
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cp "$root_dir/tests/fixtures/synthetic_aimd.mp4" "$aim_fixture"
+cp "$root_dir/tests/fixtures/synthetic_cosworth.pds" "$fixture"
+cp "$root_dir/tests/fixtures/synthetic_motec.ld" "$motec_fixture"
+cp "$root_dir/tests/fixtures/synthetic_vbo.vbo" "$vbo_fixture"
 trap 'rm -rf "$fixture_dir"' EXIT
 [[ -n "${KEEP_FIXTURES:-}" ]] && trap - EXIT
 
-python3 - "$fixture" "$motec_fixture" "$vbo_fixture" "$aim_fixture" <<'PY'
-import struct, sys
-p, motec_path, vbo_path, aim_path = sys.argv[1:]
-data = bytearray(0x700)
-def u32(o, v): struct.pack_into('<I', data, o, v)
-def utf16(o, text, size): data[o:o+len(text.encode('utf-16le'))] = text.encode('utf-16le')[:size]
-def directory(o, section, count, class_a, class_b, next_count):
-    u32(o, section); u32(o + 8, count); u32(o + 0x10, class_a)
-    u32(o + 0x14, class_b); u32(o + 0x18, next_count)
-def definition(o, channel_id, name, unit):
-    u32(o, channel_id); utf16(o + 8, name, 112); utf16(o + 0x90, unit, 32)  # unit field lives at +0x90
-def chunk(o, order, channel_id, ptr):
-    u32(o, order); u32(o + 4, channel_id); u32(o + 8, channel_id)
-    u32(o + 0x18, 10_000_000); u32(o + 0x1c, 2); u32(o + 0x38, ptr)
-
-defs, width = 0x200, 0xc0
-chunks, chunk_width = defs + width * 2, 0x40
-end = chunks + chunk_width * 4
-directory(0x80, defs, 2, 8, 1, 4)
-directory(0xa0, chunks, 4, 1, 3, 0)
-directory(0xc0, end, 0, 1, 1, 0)
-definition(defs, 1, 'Speed', 'm/s')
-definition(defs + width, 2, 'Throttle', '%')
-for i, (order, channel, values) in enumerate([
-    (100, 1, (10.0, 11.0)), (200, 2, (0.0, 25.0)),
-    (1, 1, (12.0, 13.0)), (2, 2, (50.0, 75.0)),
-]):
-    ptr = 0x580 + i * 0x20
-    chunk(chunks + i * chunk_width, order, channel, ptr)
-    struct.pack_into('<2d', data, ptr, *values)
-open(p, 'wb').write(data)
-
-motec = bytearray(0x400)
-struct.pack_into('<I', motec, 0, 0x40)
-struct.pack_into('<I', motec, 0x08, 0x200)
-struct.pack_into('<I', motec, 0x208, 0x300)
-struct.pack_into('<I', motec, 0x20c, 4)
-struct.pack_into('<H', motec, 0x212, 0x07)
-struct.pack_into('<H', motec, 0x214, 4)
-struct.pack_into('<H', motec, 0x216, 2)
-motec[0x220:0x225] = b'Speed'
-# Unit lives at +0x48 in the channel block (0x200), i.e. 0x248. 0x240 is the
-# short-name field, so writing the unit there leaves the unit empty.
-motec[0x248:0x24b] = b'm/s'
-struct.pack_into('<4f', motec, 0x300, 1, 2, 3, 4)
-open(motec_path, 'wb').write(motec)
-
-open(vbo_path, 'w').write('''[header]\ntime\nvelocity kmh\n[column names]\ntime velocity\n[data]\n120000.0 10\n120000.5 20\n120001.0 30\n120001.5 40\n''')
-
-def mp4_box(kind, payload):
-    return struct.pack('>I4s', len(payload) + 8, kind) + payload
-
-def chs_definition(record_id, name, width):
-    definition = bytearray(112)
-    struct.pack_into('<I', definition, 0, record_id)
-    definition[24:24 + len(name)] = name.encode()
-    definition[32:32 + len(name)] = name.encode()
-    struct.pack_into('<I', definition, 72, width)
-    return definition
-
-schema = bytearray(b'\x00\x00\x40\x00\x00\x00amv0s1')
-for record_id, name, width in [(42, 'RPM', 4), (55, 'GPS0', 56)]:
-    definition = chs_definition(record_id, name, width)
-    schema.extend(b'<hCHS\x00')
-    schema.extend(struct.pack('<I', len(definition)))
-    schema.extend(b'\x01>')
-    schema.extend(definition)
-struct.pack_into('>H', schema, 0, len(schema) - 2)
-
-values = bytearray(b'\x00\x00\x40\x00\x00\x00amv0')
-values.extend(b'(S')
-values.extend(struct.pack('<I', 100))
-values.extend(struct.pack('<H', 42))
-values.extend(struct.pack('<f', 1234.5))
-values.extend(b')')
-gps = bytearray(56)
-struct.pack_into('<I', gps, 0, 100)
-struct.pack_into('<I', gps, 4, 573_634_560)
-struct.pack_into('<H', gps, 12, 2429)
-struct.pack_into('<3i', gps, 16, 16_174_352, -460_842_617, 439_210_627)
-struct.pack_into('<I', gps, 28, 783)
-struct.pack_into('<3i', gps, 32, 5, -10, 8)
-struct.pack_into('<I', gps, 44, 6)
-struct.pack_into('<I', gps, 48, 0x0900_00f8)
-struct.pack_into('<I', gps, 52, 4096)
-values.extend(b'<hGPS\x00')
-values.extend(struct.pack('<I', len(gps)))
-values.extend(b'\x01>')
-values.extend(gps)
-struct.pack_into('>H', values, 0, len(values) - 2)
-
-ftyp = mp4_box(b'ftyp', b'isom\x00\x00\x00\x00isom')
-mdat = mp4_box(b'mdat', schema + values)
-chunk_offset = len(ftyp) + 8
-mdhd = bytearray(24)
-struct.pack_into('>I', mdhd, 12, 1000)
-hdlr = bytearray(24)
-hdlr[8:12] = b'meta'
-stsd = bytearray(16)
-stsd[7] = 1
-struct.pack_into('>I', stsd, 8, 8)
-stsd[12:16] = b'aimd'
-stts = bytearray(16)
-stts[7] = 1
-struct.pack_into('>II', stts, 8, 2, 100)
-stsc = bytearray(20)
-stsc[7] = 1
-struct.pack_into('>III', stsc, 8, 1, 2, 1)
-stsz = bytearray(20)
-struct.pack_into('>II', stsz, 8, 2, len(schema))
-struct.pack_into('>I', stsz, 16, len(values))
-stco = bytearray(12)
-stco[7] = 1
-struct.pack_into('>I', stco, 8, chunk_offset)
-stbl = mp4_box(b'stbl', b''.join(
-    mp4_box(kind, payload)
-    for kind, payload in [
-        (b'stsd', stsd), (b'stts', stts), (b'stsc', stsc),
-        (b'stsz', stsz), (b'stco', stco),
-    ]
-))
-minf = mp4_box(b'minf', stbl)
-mdia = mp4_box(b'mdia', mp4_box(b'mdhd', mdhd) + mp4_box(b'hdlr', hdlr) + minf)
-moov = mp4_box(b'moov', mp4_box(b'trak', mdia))
-open(aim_path, 'wb').write(ftyp + mdat + moov)
-PY
 
 out_ld="$fixture_dir/roundtrip.ld"
 mapped_ld="$fixture_dir/mapped.ld"
@@ -151,13 +30,17 @@ SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_telemetry('$
 SELECT CASE WHEN (SELECT list(\"Speed\" ORDER BY time_ns) FROM read_telemetry('$fixture', rate=2, channels='Speed', end_ns=3000000000)) = [10.0, 10.5, 11.0, 11.5, 12.0, 12.5] THEN true ELSE error('mixed-rate interpolation failed') END;
 SELECT CASE WHEN (SELECT filename FROM read_telemetry('$fixture', channels='Speed', filename=true) LIMIT 1) = '$fixture' THEN true ELSE error('filename option failed') END;
 SELECT CASE WHEN (SELECT filename FROM read_telemetry('$fixture', channels='Speed', add_filename_as_column=true) LIMIT 1) = '$fixture' THEN true ELSE error('filename alias failed') END;
-SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$motec_fixture', channel='Speed')) = [1.0, 2.0, 3.0, 4.0] THEN true ELSE error('MoTeC parser failed') END;
+SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$motec_fixture', channel='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('MoTeC parser failed') END;
 SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$vbo_fixture', channel='velocity kmh')) = [10.0, 20.0, 30.0, 40.0] THEN true ELSE error('VBO parser failed') END;
+SELECT CASE WHEN (SELECT count(*) FROM telemetry_metadata('$fixture') WHERE name IN ('Speed','Throttle Pos','Brake Pedal Pos','G_FORCE_LAT','G_FORCE_LONG','Lap Distance','Lap Number','GPS Latitude','GPS Longitude') AND sample_count=4) = 9 THEN true ELSE error('PDS important channels incomplete') END;
+SELECT CASE WHEN (SELECT count(*) FROM telemetry_metadata('$motec_fixture') WHERE name IN ('Speed','Throttle Pos','Brake Pedal Pos','G_FORCE_LAT','G_FORCE_LONG','Lap Distance','Lap Number','GPS Latitude','GPS Longitude') AND sample_count=4) = 9 THEN true ELSE error('MoTeC important channels incomplete') END;
+SELECT CASE WHEN (SELECT count(*) FROM telemetry_metadata('$vbo_fixture') WHERE name IN ('velocity kmh','throttle','brake','gforce_lat','gforce_long','distance','lap','latitude','longitude') AND sample_count=4) = 9 THEN true ELSE error('VBO important channels incomplete') END;
 SELECT CASE WHEN (SELECT sample_count FROM telemetry_metadata('$aim_fixture') WHERE name='RPM') = 1 THEN true ELSE error('AiM metadata failed') END;
 SELECT CASE WHEN (SELECT DISTINCT format FROM telemetry_metadata('$aim_fixture')) = 'aimd' THEN true ELSE error('AiM format detection failed') END;
 SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$aim_fixture', channel='RPM')) = [1234.5] THEN true ELSE error('AiM scalar decode failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_aim('$aim_fixture', channels='RPM', rate=10)) = 1 THEN true ELSE error('AiM wide reader failed') END;
 SELECT CASE WHEN (SELECT round(value, 6) FROM telemetry_samples('$aim_fixture', channel='GPS Speed')) = 0.137477 THEN true ELSE error('AiM GPS aggregate decode failed') END;
+SELECT CASE WHEN (SELECT count(*) FROM telemetry_metadata('$aim_fixture') WHERE name LIKE 'GPS %' AND sample_count=1) = 15 THEN true ELSE error('AiM GPS channel set incomplete') END;
 SELECT CASE WHEN (SELECT list(DISTINCT format ORDER BY format) FROM telemetry_metadata('$fixture_dir/*')) = ['aimd', 'motec', 'pds', 'vbo'] THEN true ELSE error('mixed-format glob failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_cosworth('$fixture', channels='Speed', rate=1)) = 4 THEN true ELSE error('read_cosworth failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_motec('$motec_fixture', channels='Speed', rate=2)) = 4 THEN true ELSE error('read_motec failed') END;
@@ -171,7 +54,7 @@ SELECT CASE WHEN (SELECT count(*) FROM telemetry_samples('$fixture', channel='Sp
 -- a MoTeC file declares its units, so provenance must be 'declared'
 SELECT CASE WHEN (SELECT unit_source FROM telemetry_metadata('$motec_fixture') WHERE name='Speed') = 'declared' THEN true ELSE error('MoTeC declared unit not detected') END;
 -- write_telemetry round-trips values bit-for-bit
-SELECT CASE WHEN (SELECT samples FROM write_telemetry('$fixture', '$out_ld')) = 8 THEN true ELSE error('write_telemetry sample count wrong') END;
+SELECT CASE WHEN (SELECT samples FROM write_telemetry('$fixture', '$out_ld')) = 36 THEN true ELSE error('write_telemetry sample count wrong') END;
 SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$out_ld', channel='Speed')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('LD round-trip lost data') END;
 -- SQL-native export mappings use lists, the unit registry, and derived sums
 SELECT CASE WHEN (SELECT [channels, samples] FROM write_telemetry('$fixture', '$mapped_ld', channel_mapping=[['Speed','Ground Speed','km/h']], sum_channels=[['Speed','Speed','Double Speed','m/s']])) = [2, 8] THEN true ELSE error('SQL-native mapped export shape failed') END;
@@ -185,14 +68,14 @@ SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_sample
 -- the wide reader renames and converts its columns too
 SELECT CASE WHEN (SELECT list(round(\"Ground Speed\", 6) ORDER BY time_ns) FROM read_telemetry('$fixture', rate=1, channels='Speed', channel_map='Speed -> Ground Speed [km/h] *3.6')) = [36.0, 39.6, 43.2, 46.8] THEN true ELSE error('wide channel_map failed') END;
 -- unmapped channels pass through untouched
-SELECT CASE WHEN (SELECT DISTINCT [channel, unit, unit_source] FROM telemetry_samples('$fixture', channel='Speed', channel_map='Throttle -> Pedal [%] *0.01')) = ['Speed', 'm/s', 'declared'] THEN true ELSE error('unmapped channel metadata changed') END;
-SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$fixture', channel='Speed', channel_map='Throttle -> Pedal [%] *0.01')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('unmapped channel was modified') END;
+SELECT CASE WHEN (SELECT DISTINCT [channel, unit, unit_source] FROM telemetry_samples('$fixture', channel='Speed', channel_map='Throttle Pos -> Pedal [%] *0.01')) = ['Speed', 'm/s', 'declared'] THEN true ELSE error('unmapped channel metadata changed') END;
+SELECT CASE WHEN (SELECT list(value ORDER BY sample_index) FROM telemetry_samples('$fixture', channel='Speed', channel_map='Throttle Pos -> Pedal [%] *0.01')) = [10.0, 11.0, 12.0, 13.0] THEN true ELSE error('unmapped channel was modified') END;
 -- column comment DDL is generated and correctly quoted
 SELECT CASE WHEN (SELECT count(*) FROM telemetry_column_comments('$motec_fixture', 'laps')) > 0 THEN true ELSE error('no column comments generated') END;
 SELECT CASE WHEN (SELECT ddl FROM telemetry_column_comments('$motec_fixture', 'laps') WHERE column_name='Speed') LIKE 'COMMENT ON COLUMN %laps%.%Speed% IS ''unit=%' THEN true ELSE error('column comment DDL malformed') END;
-SELECT CASE WHEN (SELECT kv_metadata FROM telemetry_column_comments('$fixture', 'laps') WHERE column_name='Throttle') LIKE '%native_frequency_hz=1; native_sample_period_ns=1000000000' THEN true ELSE error('native sample rate missing from column metadata') END;"
+SELECT CASE WHEN (SELECT kv_metadata FROM telemetry_column_comments('$fixture', 'laps') WHERE column_name='Throttle Pos') LIKE '%native_frequency_hz=1; native_sample_period_ns=1000000000' THEN true ELSE error('native sample rate missing from column metadata') END;"
 results="$("$DUCKDB" -unsigned -csv -noheader -c "$sql")"
-[[ "$(grep -c '^true$' <<<"$results")" = 40 ]]
+[[ "$(grep -c '^true$' <<<"$results")" = 44 ]]
 
 # Inferred conversion is intentionally restricted to direct unit-tagged reader
 # columns. Scalars and expressions must use telemetry_convert(value, from, to).

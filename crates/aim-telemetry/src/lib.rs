@@ -955,4 +955,35 @@ mod tests {
         ));
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn reads_checked_in_aimd_fixture_with_all_gps_channels() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/synthetic_aimd.mp4");
+        let file = AimFile::open(path).unwrap();
+        assert_eq!(file.channels.len(), 16);
+        for name in [
+            "GPS Latitude",
+            "GPS Longitude",
+            "GPS Altitude",
+            "GPS Speed",
+            "GPS Heading",
+            "GPS Satellites",
+            "GPS Position Accuracy",
+            "GPS Speed Accuracy",
+            "GPS ECEF Velocity X",
+            "GPS ECEF Velocity Y",
+            "GPS ECEF Velocity Z",
+            "GPS iTOW",
+            "GPS Week",
+            "GPS DOP",
+            "GPS Fix Flags",
+        ] {
+            let channel = file
+                .channels
+                .iter()
+                .find(|channel| channel.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(channel.sample_count, 1, "{name} sample count");
+        }
+    }
 }
