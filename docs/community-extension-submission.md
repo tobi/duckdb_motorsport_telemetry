@@ -28,7 +28,7 @@ The prepared descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools. The stand
 ## Prepared descriptor
 
 The v0.7.0 descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
-`0.7.0` at commit `1bfb9acaaaf4bbd2ca0743bf717f7ac3d5ac8601` (tag `v0.7.0`) and excludes DuckDB-Wasm, musl, MinGW, and
+`0.7.0` at commit `18a5d35b5e03f210f730c048d6f85d8f8d3373c5` (tag `v0.7.0`) and excludes DuckDB-Wasm, musl, MinGW, and
 RTools; native Linux, macOS, and Windows MSVC are enabled.
 
 The prior upstream pull request, [#2363](https://github.com/duckdb/community-extensions/pull/2363), published version
