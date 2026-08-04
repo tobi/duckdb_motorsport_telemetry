@@ -7,8 +7,8 @@ on:
     inputs:
       extension_version:
         description: Extension metadata version used for a Pages-only refresh
-        required: true
-        default: v0.6.1
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -39,11 +39,15 @@ jobs:
       - name: Package DuckDB extension
         shell: bash
         run: |
+          extension_version="${{ inputs.extension_version }}"
+          if [[ -z "$extension_version" ]]; then
+            extension_version="$(tr -d '\r\n' < VERSION)"
+          fi
           python scripts/package_extension.py \
             --library '${{ matrix.library }}' \
             --output 'dist/${{ matrix.platform }}/motorsport_telemetry.duckdb_extension' \
             --platform '${{ matrix.platform }}' \
-            --extension-version '${{ inputs.extension_version || github.ref_name }}'
+            --extension-version "$extension_version"
           python - <<'PY'
           from zipfile import ZIP_DEFLATED, ZipFile
           platform = '${{ matrix.platform }}'
@@ -74,7 +78,7 @@ jobs:
           workspaces: wasm-extension
       - name: Build DuckDB-Wasm extension
         env:
-          EXTENSION_VERSION: ${{ inputs.extension_version || github.ref_name }}
+          EXTENSION_VERSION: ${{ inputs.extension_version }}
         run: |
           scripts/build_wasm_extension.sh
           python - <<'PY'

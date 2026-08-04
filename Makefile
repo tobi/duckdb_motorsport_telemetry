@@ -3,18 +3,21 @@ USE_UNSTABLE_C_API=0
 # The extension uses only the stable public C API introduced in v1.2.0.
 # Community Extensions overrides this with its current DuckDB build version.
 TARGET_DUCKDB_VERSION?=v1.2.0
-EXTENSION_VERSION?=v0.6.1
+EXTENSION_VERSION?=$(shell cat VERSION)
 DUCKDB?=duckdb
 
 include extension-ci-tools/makefiles/c_api_extensions/base.Makefile
 include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 
-.PHONY: all build configure debug release test test_debug test_release integration-test clean
+.PHONY: all build configure debug release test test_debug test_release integration-test clean sync-version
 
 all: release
 build: release
 
-configure: venv platform extension_version
+configure: sync-version venv platform extension_version
+
+sync-version:
+	python3 scripts/sync_version.py
 
 # The build and test targets stay separate, exactly as the Community Extension
 # workflow invokes them: `configure`/`configure_ci`, then `release`, then

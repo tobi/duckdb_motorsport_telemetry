@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${OUT:-"$ROOT/build/wasm"}
-VERSION=${EXTENSION_VERSION:-v0.6.1}
+VERSION=${EXTENSION_VERSION:-$(tr -d '\r\n' < "$ROOT/VERSION")}
 TARGET=wasm32-unknown-emscripten
 ARCHIVE="$ROOT/wasm-extension/target/$TARGET/release/examples/libmotorsport_telemetry.a"
 RAW="$OUT/motorsport_telemetry.raw.wasm"

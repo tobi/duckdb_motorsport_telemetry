@@ -25,11 +25,16 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--platform", required=True)
     parser.add_argument("--api-version", default="v1.2.0")
-    parser.add_argument("--extension-version", default="v0.5.0")
+    parser.add_argument("--extension-version")
     args = parser.parse_args()
+    version = args.extension_version
+    if version is None:
+        version = (
+            Path(__file__).resolve().parents[1] / "VERSION"
+        ).read_text(encoding="utf-8").strip()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.library, args.output)
-    append_footer(args.output, args.platform, args.api_version, args.extension_version)
+    append_footer(args.output, args.platform, args.api_version, version)
     print(args.output)
 
 

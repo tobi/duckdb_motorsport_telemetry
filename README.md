@@ -13,19 +13,10 @@ The exact model is two relations—channel metadata and native-rate samples—pl
 
 ## Easiest installation
 
-Start DuckDB 1.4.3 with unsigned extensions enabled:
-
-```sh
-duckdb -unsigned
-```
-
-Enable DuckDB's signed HTTPS filesystem extension, then install directly from this project's extension repository:
+Install the signed DuckDB Community Extension:
 
 ```sql
-INSTALL httpfs;
-LOAD httpfs;
-INSTALL motorsport_telemetry
-FROM 'https://pages.tobi.lutke.com/duckdb_motorsport_telemetry';
+INSTALL motorsport_telemetry FROM community;
 LOAD motorsport_telemetry;
 ```
 
@@ -36,13 +27,19 @@ SELECT name, unit, frequency_hz, sample_count
 FROM telemetry_metadata('/path/to/run.pds');
 ```
 
-DuckDB downloads the platform-specific `.duckdb_extension.gz`, decompresses it, and installs it in the normal extension directory. `httpfs` is needed only because the repository uses HTTPS. Subsequent sessions only need:
+DuckDB downloads the platform-specific build from the Community Extension endpoint and verifies its signature. `httpfs` and `-unsigned` are not required. Subsequent sessions only need:
 
 ```sql
 LOAD motorsport_telemetry;
 ```
 
-The repository artifacts are unsigned, so every DuckDB process loading the extension must still allow unsigned extensions. See [Install from GitHub Releases](#install-from-github-releases) for manual ZIP installation and Python usage.
+If DuckDB still finds an older cached `0.6.0` artifact, refresh it with:
+
+```sql
+FORCE INSTALL motorsport_telemetry FROM community;
+```
+
+The checked-in release version is maintained in [`VERSION`](VERSION), and all package, artifact, and release metadata is synchronized from that file.
 
 ## Browser telemetry lab
 
@@ -118,7 +115,7 @@ One row per channel definition:
 | Column | Meaning |
 |---|---|
 | `file` | Full input path |
-| `format` | `pds`, `motec`, or `vbo` |
+| `format` | `aimd`, `pds`, `motec`, or `vbo` |
 | `channel_id` | File-local channel identifier |
 | `name`, `unit` | Original channel metadata |
 | `unit_source` | Where `unit` came from: `declared`, `spec_default`, or `unknown` |
@@ -630,12 +627,12 @@ It invokes the DuckDB CLI; the Python `duckdb` package is not required.
 
 ## Install from GitHub Releases
 
-The HTTPS `INSTALL ... FROM` command above is recommended. For manual or offline installation, release archives contain a platform-native file named exactly `motorsport_telemetry.duckdb_extension`.
+The signed Community Extension installation above is recommended for native DuckDB. For manual or offline installation, release archives contain a platform-native file named exactly `motorsport_telemetry.duckdb_extension`.
 
 ### Linux x86-64
 
 ```sh
-curl -LO https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.6.1/motorsport_telemetry-linux_amd64.zip
+curl -LO https://github.com/tobi/duckdb_motorsport_telemetry/releases/latest/download/motorsport_telemetry-linux_amd64.zip
 unzip motorsport_telemetry-linux_amd64.zip
 duckdb -unsigned
 ```
@@ -649,7 +646,7 @@ LOAD motorsport_telemetry;
 
 ```powershell
 Invoke-WebRequest `
-  https://github.com/tobi/duckdb_motorsport_telemetry/releases/download/v0.6.1/motorsport_telemetry-windows_amd64.zip `
+  https://github.com/tobi/duckdb_motorsport_telemetry/releases/latest/download/motorsport_telemetry-windows_amd64.zip `
   -OutFile motorsport_telemetry-windows_amd64.zip
 Expand-Archive motorsport_telemetry-windows_amd64.zip
 .\duckdb.exe -unsigned
@@ -664,7 +661,7 @@ LOAD motorsport_telemetry;
 
 Download `motorsport_telemetry-osx_arm64.zip`, extract it, start DuckDB with `-unsigned`, then use the same `INSTALL` and `LOAD` statements.
 
-GitHub artifacts are unsigned, so every process loading one must allow unsigned extensions. In Python:
+GitHub release artifacts are unsigned, so every process loading one must allow unsigned extensions. In Python:
 
 ```python
 import duckdb
@@ -675,14 +672,7 @@ con.execute("LOAD motorsport_telemetry")
 print(con.sql("SELECT * FROM telemetry_metadata('run.vbo')"))
 ```
 
-The repository is now prepared for a DuckDB Community Extension submission, which will enable signed installation without `-unsigned`:
-
-```sql
-INSTALL motorsport_telemetry FROM community;
-LOAD motorsport_telemetry;
-```
-
-See the [submission plan](docs/community-extension-submission.md) and [upstream descriptor draft](community-extension/description.yml).
+The Community Extension is published from [upstream PR #2363](https://github.com/duckdb/community-extensions/pull/2363). The release path remains useful for offline installs and historical versions; this descriptor currently excludes DuckDB-Wasm, musl, MinGW, and RTools, while the project's standalone repository remains the path for its separate DuckDB-Wasm build.
 
 ## Build from source
 
