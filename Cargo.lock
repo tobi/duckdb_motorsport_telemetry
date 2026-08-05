@@ -2294,6 +2294,7 @@ dependencies = [
 name = "vbo-telemetry"
 version = "0.7.0"
 dependencies = [
+ "memmap2",
  "motorsport-telemetry-core",
  "tempfile",
  "thiserror",
