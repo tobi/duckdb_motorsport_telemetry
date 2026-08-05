@@ -35,8 +35,9 @@ SELECT * FROM read_aim(
 
 `read_aim` and `read_aimd` are AiM-specific wide-reader aliases;
 `read_telemetry('session.mp4', ...)` auto-detects the `aimd` track. These
-entry points are native-only in this workspace. The DuckDB-Wasm adapter accepts
-PDS, LD, and VBO bytes but rejects AiM MP4.
+entry points are native-only in this workspace. The DuckDB-Wasm build does not
+link the AiM parser, so `.mp4` inputs and the `read_aim`/`read_aimd` functions
+are unavailable in the browser.
 
 `GPS0` expands into 15 derived channels: `GPS Latitude`, `GPS Longitude`,
 `GPS Altitude`, `GPS Speed`, `GPS Heading`, `GPS Satellites`,

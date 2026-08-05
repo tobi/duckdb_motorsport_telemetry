@@ -17,9 +17,9 @@ The reader identifies the track from `stsd`'s `aimd` sample entry. It supports n
 
 The native `aim-telemetry` crate memory-maps a local MP4. In the DuckDB
 extension, `telemetry_metadata`, `telemetry_samples`, `read_telemetry`,
-`read_aim`, and `read_aimd` expose the same source. The Emscripten/WASM adapter
-does not support AiM MP4; it returns an explicit unsupported-format error
-instead of attempting to copy or decode the file.
+`read_aim`, and `read_aimd` expose the same source. The DuckDB-Wasm build does
+not link the AiM parser, so `.mp4` inputs and the `read_aim`/`read_aimd`
+functions are unavailable in the browser.
 
 The parser does not inspect video or audio payloads. It requires an `aimd`
 sample-entry track and rejects malformed sample tables, missing `amv0`

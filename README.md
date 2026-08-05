@@ -20,7 +20,7 @@ Input support is split by runtime:
 | MoTeC LD | Yes | Yes |
 | Racelogic VBO | Yes | Yes |
 
-The MP4 reader is a native DuckDB feature in v0.7.0. Use a native DuckDB installation for `.mp4`; the browser/WASM adapter deliberately rejects AiM MP4 because it memory-maps files through the native filesystem path.
+The MP4 reader is a native DuckDB feature in v0.7.0. The DuckDB-Wasm build does not link the AiM parser; `.mp4` inputs and the `read_aim`/`read_aimd` functions are unavailable in the browser.
 
 ## Easiest installation
 
@@ -54,7 +54,7 @@ The checked-in release version is maintained in [`VERSION`](VERSION), and all pa
 
 ## Browser telemetry lab
 
-Open **[Telemetry Lab](https://pages.tobi.lutke.com/duckdb_motorsport_telemetry/)** to analyze a PDS, LD, or VBO recording without installing anything. Drop a `.pds`, `.ld`, or `.vbo` file into the page; the file stays in your browser and is never uploaded. AiM `.mp4` recordings require the native DuckDB installation described above.
+Open **[Telemetry Lab](https://pages.tobi.lutke.com/duckdb_motorsport_telemetry/)** to analyze a PDS, LD, or VBO recording without installing anything. Drop a `.pds`, `.ld`, or `.vbo` file into the page; the file stays in your browser and is never uploaded. The DuckDB-Wasm build does not link the AiM parser, so AiM `.mp4` inputs and the `read_aim`/`read_aimd` functions are unavailable there.
 
 The lab runs this same Rust extension as a DuckDB-Wasm side module and automatically shows:
 
