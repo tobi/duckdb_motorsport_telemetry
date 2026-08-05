@@ -913,12 +913,7 @@ mod tests {
 
     #[test]
     fn reads_aimd_track_and_fails_fast_without_one() {
-        let unique = format!(
-            "aim-{}-{}.mp4",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        );
-        let path = std::env::temp_dir().join(unique);
+        let path = std::env::temp_dir().join(format!("aim-{}.mp4", std::process::id()));
         std::fs::write(&path, fixture_mp4(true)).unwrap();
         let file = AimFile::open(&path).unwrap();
         assert_eq!(file.channels[0].name, "RPM");
