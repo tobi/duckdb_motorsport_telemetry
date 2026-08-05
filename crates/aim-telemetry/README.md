@@ -16,6 +16,39 @@ See [`FORMAT.md`](FORMAT.md) for the documented MP4 tables, packet framing, `CHS
 
 `GPS0` is decoded into geodetic position, speed, heading, accuracy, satellite, timing and status channels at its native 25 Hz. `LapPk` remains unexpanded: it is defined but has no payload in any of the five available recordings, while lap number and lap timing are carried by ordinary scalar channels. Scalar channels without a safely decoded unit remain unitless with `unit_source = unknown`.
 
+## DuckDB integration
+
+The native DuckDB adapter exposes this parser through:
+
+```sql
+SELECT * FROM telemetry_metadata('session.mp4');
+SELECT * FROM telemetry_samples(
+  'session.mp4',
+  channel := 'RPM,GPS Speed,GPS Latitude,GPS Longitude'
+);
+SELECT * FROM read_aim(
+  'session.mp4',
+  channels := 'RPM,GPS Speed,GPS Latitude,GPS Longitude',
+  rate := 10
+);
+```
+
+`read_aim` and `read_aimd` are AiM-specific wide-reader aliases;
+`read_telemetry('session.mp4', ...)` auto-detects the `aimd` track. These
+entry points are native-only in this workspace. The DuckDB-Wasm adapter accepts
+PDS, LD, and VBO bytes but rejects AiM MP4.
+
+`GPS0` expands into 15 derived channels: `GPS Latitude`, `GPS Longitude`,
+`GPS Altitude`, `GPS Speed`, `GPS Heading`, `GPS Satellites`,
+`GPS Position Accuracy`, `GPS Speed Accuracy`, `GPS ECEF Velocity X`,
+`GPS ECEF Velocity Y`, `GPS ECEF Velocity Z`, `GPS iTOW`, `GPS Week`,
+`GPS DOP`, and `GPS Fix Flags`.
+
+The reader does not decode video or audio, does not reconstruct `LapPk` without
+a payload, and leaves scalar units unknown when the `CHS` record does not
+provide a validated quantity. See [`FORMAT.md`](FORMAT.md) for the exact
+packet and field compatibility rules.
+
 ```rust
 use aim_telemetry::AimFile;
 use motorsport_telemetry_core::TelemetrySource;

@@ -13,6 +13,18 @@ The telemetry track uses:
 
 The reader identifies the track from `stsd`'s `aimd` sample entry. It supports normal and extended-size MP4 boxes, `stco` and `co64`, constant or per-sample `stsz`, multi-entry `stsc`, and run-length `stts` timing. It does not assume a track index or contiguous data track.
 
+## Reader/runtime contract
+
+The native `aim-telemetry` crate memory-maps a local MP4. In the DuckDB
+extension, `telemetry_metadata`, `telemetry_samples`, `read_telemetry`,
+`read_aim`, and `read_aimd` expose the same source. The Emscripten/WASM adapter
+does not support AiM MP4; it returns an explicit unsupported-format error
+instead of attempting to copy or decode the file.
+
+The parser does not inspect video or audio payloads. It requires an `aimd`
+sample-entry track and rejects malformed sample tables, missing `amv0`
+signatures, duplicate scalar record IDs, and empty supported scalar streams.
+
 ## AiM packet envelope
 
 Every observed MP4 sample begins with:
@@ -64,6 +76,25 @@ Widths of one and four bytes are currently exposed. One-byte records are unsigne
 ## GPS aggregate
 
 AiM's [GPS09c product documentation](https://www.aim-sportline.com/en/products/gps09c/index.htm) identifies its GPS channels and states that they are available at 25 Hz. Each observed `GPS0` definition declares a width of 56 bytes, and data arrives in `<hGPS>` blocks of that declared width.
+
+### Exported GPS channel names
+
+One valid 56-byte `GPS0` payload produces:
+
+| Channel | Unit | Derivation |
+|---|---|---|
+| `GPS Latitude` / `GPS Longitude` | `deg` | ECEF position converted to WGS84 |
+| `GPS Altitude` | `m` | WGS84 ellipsoid altitude |
+| `GPS Speed` | `m/s` | ECEF velocity magnitude |
+| `GPS Heading` | `deg` | True heading from ECEF velocity |
+| `GPS Satellites` | `count` | High byte of the packed field |
+| `GPS Position Accuracy` | `m` | Payload centimetres divided by 100 |
+| `GPS Speed Accuracy` | `m/s` | Payload centimetres per second divided by 100 |
+| `GPS ECEF Velocity X/Y/Z` | `m/s` | Payload centimetres per second divided by 100 |
+| `GPS iTOW` | `ms` | GPS time of week |
+| `GPS Week` | `count` | GPS week |
+| `GPS DOP` | `ratio` | Packed low 24 bits divided by 100 |
+| `GPS Fix Flags` | `raw` | Payload flags, unscaled |
 
 | GPS payload offset | Encoding | Export | Unit |
 |---:|---|---|---|

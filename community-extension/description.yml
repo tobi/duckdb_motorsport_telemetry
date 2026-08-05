@@ -24,12 +24,25 @@ docs:
     FROM read_telemetry('run.ld',
       rate := 100,
       channels := 'Ground Speed,Throttle Pos,Brake Pedal Pos');
+
+    SELECT name, unit, frequency_hz, sample_count
+    FROM telemetry_metadata('run.mp4')
+    WHERE sample_count > 0;
+
+    SELECT *
+    FROM read_aim('run.mp4',
+      rate := 10,
+      channels := 'RPM,GPS Speed,GPS Latitude,GPS Longitude');
   extended_description: |
     `motorsport_telemetry` reads AiM `aimd` telemetry embedded in MP4, Pi
     Research/Cosworth PDS, MoTeC i2 LD, and Racelogic VBOX VBO files without an
-    export step. It provides exact channel metadata, native-rate long-form
-    samples, and projected wide readers with time/channel pruning and
-    type-aware interpolation. Integer and event channels always use
-    previous-value semantics; only floating-point channels can interpolate
-    linearly. The parsers memory-map native files and table functions produce
-    vectorized DuckDB output.
+    export step. AiM MP4 support is native-only; the DuckDB-Wasm adapter
+    intentionally rejects it. The native reader exposes scalar `CHS` channels
+    and expands each valid 56-byte `GPS0` aggregate into 15 GPS channels,
+    including WGS84 position, speed, heading, accuracy, timing, and status.
+    It provides exact channel metadata, native-rate long-form samples, and
+    projected wide readers with time/channel pruning and type-aware
+    interpolation. Integer and event channels always use previous-value
+    semantics; only floating-point channels can interpolate linearly. The
+    parsers memory-map native files and table functions produce vectorized
+    DuckDB output.

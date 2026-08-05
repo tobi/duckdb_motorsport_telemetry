@@ -11,6 +11,17 @@ A fast, vectorized DuckDB extension and reusable Rust parser workspace for:
 
 The exact model is two relations—channel metadata and native-rate samples—plus a friendly interpolated wide reader. Files are memory-mapped where possible, values decode directly into DuckDB vectors, scans are parallel, and projection pushdown avoids decoding channels a query does not use.
 
+Input support is split by runtime:
+
+| Input | Native DuckDB | DuckDB-Wasm/browser |
+|---|---:|---:|
+| AiM MP4 with an `aimd` track | Yes | No |
+| Pi/Cosworth PDS | Yes | Yes |
+| MoTeC LD | Yes | Yes |
+| Racelogic VBO | Yes | Yes |
+
+The MP4 reader is a native DuckDB feature in v0.7.0. Use a native DuckDB installation for `.mp4`; the browser/WASM adapter deliberately rejects AiM MP4 because it memory-maps files through the native filesystem path.
+
 ## Easiest installation
 
 Install the signed DuckDB Community Extension:
@@ -43,7 +54,7 @@ The checked-in release version is maintained in [`VERSION`](VERSION), and all pa
 
 ## Browser telemetry lab
 
-Open **[Telemetry Lab](https://pages.tobi.lutke.com/duckdb_motorsport_telemetry/)** to analyze a recording without installing anything. Drop a `.pds`, `.ld`, or `.vbo` file into the page; the file stays in your browser and is never uploaded.
+Open **[Telemetry Lab](https://pages.tobi.lutke.com/duckdb_motorsport_telemetry/)** to analyze a PDS, LD, or VBO recording without installing anything. Drop a `.pds`, `.ld`, or `.vbo` file into the page; the file stays in your browser and is never uploaded. AiM `.mp4` recordings require the native DuckDB installation described above.
 
 The lab runs this same Rust extension as a DuckDB-Wasm side module and automatically shows:
 
@@ -89,22 +100,65 @@ FROM read_telemetry(
 
 ### AiM video telemetry
 
-AiM SmartyCam-style MP4 recordings are queried directly; no FFmpeg extraction step is required:
+AiM SmartyCam-style MP4 recordings with an `aimd` sample-entry track are queried directly by native DuckDB; no FFmpeg extraction step is required. The file must be a local path because remote/httpfs paths are not supported.
+
+Start with metadata. Channel names come from the recording's `CHS` schema, so inspect them before choosing a projection:
 
 ```sql
-SELECT name, data_type, frequency_hz, sample_count
+SELECT name, unit, data_type, frequency_hz, sample_count
 FROM telemetry_metadata('session.mp4')
-WHERE sample_count > 0;
-
-SELECT time_ns / 1e9 AS seconds, value
-FROM telemetry_samples('session.mp4', channel := 'RPM')
-ORDER BY time_ns;
-
-SELECT *
-FROM read_aim('session.mp4', channels := 'RPM,Speed_Wspd_App', rate := 10);
+WHERE sample_count > 0
+ORDER BY name;
 ```
 
-The native reader memory-maps the MP4 and follows its ISO-BMFF sample tables, so the video and audio payloads are neither loaded into memory nor decoded. It identifies the data track by the `aimd` sample-entry FourCC and fails immediately when an MP4 has no such track. Channel names, record IDs and widths come from the embedded AiM `CHS` definitions rather than a firmware-specific fixed layout. The 56-byte `GPS0` aggregate is decoded into 25 Hz geodetic position, velocity, heading, accuracy, satellite, GPS-time and status channels. `LapPk` is not fabricated: five inspected recordings define it but contain no payload, while their lap number and timing arrive as scalar channels. Unknown units remain explicitly `unknown` rather than being guessed.
+Read exact native-rate samples, including derived GPS channels:
+
+```sql
+SELECT time_ns / 1e9 AS seconds, channel, value, unit
+FROM telemetry_samples(
+    'session.mp4',
+    channel := 'RPM,GPS Speed,GPS Latitude,GPS Longitude'
+)
+ORDER BY channel, time_ns;
+```
+
+Use either the generic reader or the AiM-specific aliases for a synchronized wide result:
+
+```sql
+SELECT time_ns, "RPM", "GPS Speed", "GPS Latitude", "GPS Longitude"
+FROM read_aim(
+    'session.mp4',
+    channels := 'RPM,GPS Speed,GPS Latitude,GPS Longitude',
+    rate := 10
+);
+
+-- `read_aimd` is an alias; `read_telemetry` auto-detects `.mp4`.
+```
+
+### GPS0 output
+
+Each supported 56-byte `GPS0` aggregate produces these 15 channels:
+
+`GPS Latitude`, `GPS Longitude`, `GPS Altitude`, `GPS Speed`, `GPS Heading`,
+`GPS Satellites`, `GPS Position Accuracy`, `GPS Speed Accuracy`,
+`GPS ECEF Velocity X`, `GPS ECEF Velocity Y`, `GPS ECEF Velocity Z`, `GPS iTOW`,
+`GPS Week`, `GPS DOP`, and `GPS Fix Flags`.
+
+Position is converted from ECEF centimetres to WGS84 latitude/longitude degrees
+and ellipsoid altitude metres. Velocity is converted from ECEF centimetres per
+second to metres per second; heading is true heading in degrees. GPS accuracy,
+satellite count, DOP, timing, and fix flags retain their documented source
+scales. Real GPS09c recordings observed by this reader provide GPS at 25 Hz;
+the reader reports the native rate found in each file.
+
+### AiM compatibility boundaries
+
+- The reader identifies `aimd` by the MP4 `stsd` sample-entry FourCC, not by track number or localized handler text.
+- It supports normal and extended-size boxes, `stco`/`co64`, constant or per-sample `stsz`, multi-entry `stsc`, and run-length `stts`.
+- Scalar records currently expose one-byte status values and four-byte float/integer values from `CHS` definitions.
+- `GPS0` is decoded only when its declared payload width is 56 bytes.
+- `LapPk` is recognized as a definition but is not fabricated into channels when its payload is absent; lap number and timing remain ordinary scalar channels.
+- Unknown scalar units remain `unit_source = unknown` rather than being inferred from channel names.
 
 ## Functions
 
