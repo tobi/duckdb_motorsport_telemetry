@@ -1,11 +1,11 @@
 ---
 name: duckdb-motorsport-telemetry
-description: Query Pi/Cosworth PDS, MoTeC LD, and Racelogic VBO telemetry directly in DuckDB. Use when inspecting telemetry channels, extracting native samples, resampling mixed-rate channels, comparing files, converting telemetry to Parquet, or pruning telemetry archives by file creation date.
+description: Query AiM MP4 files with an `aimd` telemetry track, Pi/Cosworth PDS, MoTeC LD, and Racelogic VBO telemetry directly in DuckDB. Use when inspecting telemetry channels, extracting native samples, resampling mixed-rate channels, comparing files, converting telemetry to Parquet, or pruning telemetry archives by file creation date.
 ---
 
 # DuckDB Motorsport Telemetry
 
-Use the extension's exact metadata/sample relations before choosing a wide resampling rate. Preserve source units unless the analysis explicitly converts them.
+Use the extension's exact metadata/sample relations before choosing a wide resampling rate. Preserve source units unless the analysis explicitly converts them. Native DuckDB reads local AiM `.mp4` files when they contain an `aimd` telemetry track; the DuckDB-Wasm/browser build does not link the AiM parser.
 
 ## Load
 
@@ -54,10 +54,44 @@ SELECT * FROM read_cosworth(
 
 Available readers:
 
-- `read_telemetry` — auto-detect `.pds`, `.ld`, `.vbo`; supports mixed-format globs
+- `read_telemetry` — auto-detect `.pds`, `.ld`, `.vbo`, and `.mp4` files; MP4 requires an `aimd` track
+- `read_aim` — AiM `aimd` telemetry embedded in MP4
+- `read_aimd` — alias for `read_aim`
 - `read_cosworth` — Pi/Cosworth PDS
 - `read_motec` — MoTeC LD
 - `read_vbo` — Racelogic VBOX VBO
+
+## AiM MP4
+
+Use native DuckDB for local MP4 recordings with an `aimd` sample-entry track:
+
+```sql
+SELECT name, unit, frequency_hz, sample_count
+FROM telemetry_metadata('session.mp4')
+WHERE sample_count > 0
+ORDER BY name;
+
+SELECT time_ns, channel, value, unit
+FROM telemetry_samples(
+  'session.mp4',
+  channel := 'RPM,GPS Speed,GPS Latitude,GPS Longitude'
+);
+
+SELECT *
+FROM read_aim(
+  'session.mp4',
+  rate := 10,
+  channels := 'RPM,GPS Speed,GPS Latitude,GPS Longitude'
+);
+```
+
+The parser reads the MP4 `aimd` track directly and never decodes video or
+audio. A valid 56-byte `GPS0` aggregate expands into 15 channels, including
+latitude, longitude, altitude, speed, heading, satellite count, position and
+speed accuracy, ECEF velocity, GPS time/week, DOP, and fix flags. `LapPk` is
+not fabricated when its payload is absent. MP4, `read_aim`, and `read_aimd` are
+unavailable in the WASM/browser build because that build does not link the AiM
+parser.
 
 ## Pushdown rules
 
