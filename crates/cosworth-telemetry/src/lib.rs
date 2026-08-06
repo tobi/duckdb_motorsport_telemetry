@@ -594,6 +594,10 @@ mod tests {
     fn preserves_chunk_table_order_and_interpolates() {
         let fixture = fixture();
         let file = CosworthFile::open(fixture.path()).unwrap();
+        let in_memory =
+            CosworthFile::from_bytes("fixture.pds", std::fs::read(fixture.path()).unwrap())
+                .unwrap();
+        assert_eq!(in_memory.channels.len(), 2);
         assert_eq!(file.channels.len(), 2);
         assert_eq!(file.channels[0].sample_count, 4);
         let values = (0..4)

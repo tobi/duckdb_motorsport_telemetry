@@ -329,6 +329,9 @@ mod tests {
     fn decodes_float_and_scaled_integer_channels() {
         let fixture = fixture();
         let file = MotecFile::open(fixture.path()).unwrap();
+        let in_memory =
+            MotecFile::from_bytes("fixture.ld", std::fs::read(fixture.path()).unwrap()).unwrap();
+        assert_eq!(in_memory.channels.len(), 2);
         assert_eq!(
             (&file.driver, &file.vehicle, &file.venue),
             (&"Tobi".into(), &"Oreca07".into(), &"Mosport".into())

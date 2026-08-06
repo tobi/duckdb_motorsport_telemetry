@@ -339,6 +339,9 @@ mod tests {
     fn parses_irregular_timestamps_and_interpolates_continuous_values() {
         let fixture = fixture("[header]\ntime\nvelocity kmh\n[column names]\ntime velocity\n[data]\n120000.0 10\n120000.5 20\n120001.5 40\n");
         let file = VboFile::open(fixture.path()).unwrap();
+        let in_memory =
+            VboFile::from_bytes("fixture.vbo", std::fs::read(fixture.path()).unwrap()).unwrap();
+        assert_eq!(in_memory.channels.len(), 2);
         assert_eq!(file.time_ns, [0, 500_000_000, 1_500_000_000]);
         assert_eq!(file.decode(1, 0, 2), 40.0);
         assert_eq!(file.sample_at(1, 1_000_000_000, true), Some(30.0));
