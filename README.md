@@ -781,13 +781,14 @@ GitHub Actions workflows:
 
 This is one Cargo workspace; DuckDB is only the adapter layer.
 
-| Crate | Purpose |
-|---|---|
-| `motorsport-telemetry-core` | Shared channel/chunk model, exact samples, interpolation |
-| `cosworth-telemetry` | Memory-mapped Pi/Cosworth PDS parser |
-| `motec-telemetry` | Memory-mapped MoTeC LD parser and conversion formula |
-| `vbo-telemetry` | Racelogic VBO text parser with irregular timestamps |
-| `duckdb-motorsport-telemetry` | Vectorized DuckDB table functions |
+| Crate | Standalone library API | Native storage |
+|---|---|---|
+| `motorsport-telemetry-core` | `TelemetrySource`, `Channel`, `Chunk` | No file I/O |
+| `cosworth-telemetry` | `CosworthFile::open` / `from_bytes` | `open` memory-maps PDS |
+| `aim-telemetry` | `AimFile::open` / `from_bytes` | `open` memory-maps MP4 |
+| `motec-telemetry` | `MotecFile::open` / `from_bytes` | `open` memory-maps LD |
+| `vbo-telemetry` | `VboFile::open` / `from_bytes` / `from_slice` | `open` memory-maps VBO |
+| `duckdb-motorsport-telemetry` | DuckDB table functions | Uses native parser mappings |
 
 Use a parser without DuckDB:
 
@@ -806,8 +807,8 @@ println!("at 10s={:?}", file.sample_at(speed, 10_000_000_000, true));
 ```
 
 Run the standalone inspectors:
-
 ```sh
+cargo run -p aim-telemetry --example inspect -- run.mp4
 cargo run -p cosworth-telemetry --example inspect_cosworth -- run.pds
 cargo run -p motec-telemetry --example inspect_motec -- run.ld
 cargo run -p vbo-telemetry --example inspect_vbo -- run.vbo

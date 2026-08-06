@@ -16,6 +16,10 @@ See [`FORMAT.md`](FORMAT.md) for the documented MP4 tables, packet framing, `CHS
 
 `GPS0` is decoded into geodetic position, speed, heading, accuracy, satellite, timing and status channels at its native 25 Hz. `LapPk` remains unexpanded: it is defined but has no payload in any of the five available recordings, while lap number and lap timing are carried by ordinary scalar channels. Scalar channels without a safely decoded unit remain unitless with `unit_source = unknown`.
 
+The standalone library exposes `AimFile::open(path)` for local native MP4s;
+it memory-maps the file. `AimFile::from_bytes(path, bytes)` is the equivalent
+owned-buffer constructor for callers that already have MP4 bytes.
+
 ## DuckDB integration
 
 The native DuckDB adapter exposes this parser through:

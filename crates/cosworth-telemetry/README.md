@@ -2,6 +2,14 @@
 
 Standalone memory-mapped Pi/Cosworth PDS parser. It supports marker and markerless definitions, typed values, compact exports, bounds checking, and authoritative chunk-table ordering.
 
+## Library contract
+
+`CosworthFile::open(path)` memory-maps a local PDS and parses metadata directly
+from the mapping. `CosworthFile::from_bytes(path, bytes)` owns an in-memory
+buffer for callers that already have the file bytes. Both constructors return
+the same `CosworthFile` and `TelemetrySource` behavior; choose `open` for
+native files and `from_bytes` for embedded input.
+
 ```rust
 use motorsport_telemetry_core::TelemetrySource;
 use cosworth_telemetry::CosworthFile;

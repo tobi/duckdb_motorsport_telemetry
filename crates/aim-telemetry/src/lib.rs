@@ -1,13 +1,17 @@
 //! AiM Sports `aimd` telemetry embedded in ISO Base Media (MP4) files.
 //!
-//! The MP4 is memory-mapped and only the samples belonging to the `aimd`
-//! track are inspected. Video and audio payloads are never copied or decoded.
+//! Local MP4 files are memory-mapped; `from_bytes` owns its input buffer.
+//! Only samples belonging to the `aimd` track are inspected. Video and audio
+//! payloads are never copied or decoded.
 //! AiM channel definitions are read from the stream's `CHS` records; channel
 //! order, offsets and names are not fixed in this reader.
 
+#[cfg(not(target_os = "emscripten"))]
 use memmap2::Mmap;
 use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource, UnitSource};
-use std::{collections::HashMap, fs::File, path::Path};
+use std::collections::HashMap;
+#[cfg(not(target_os = "emscripten"))]
+use std::{fs::File, path::Path};
 use thiserror::Error;
 
 const AIMD: &[u8; 4] = b"aimd";
@@ -284,12 +288,30 @@ impl Representation {
     }
 }
 
+#[derive(Debug)]
+enum Storage {
+    #[cfg(not(target_os = "emscripten"))]
+    Mapped(Mmap),
+    Owned(Box<[u8]>),
+}
+
+impl std::ops::Deref for Storage {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Mapped(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
 /// An AiM telemetry stream embedded in an MP4 recording.
 #[derive(Debug)]
 pub struct AimFile {
     pub path: String,
     pub channels: Vec<Channel>,
-    data: Mmap,
+    data: Storage,
     aim_channels: Vec<AimChannel>,
 }
 
@@ -524,6 +546,7 @@ fn period_chunks(samples: &[SampleRef]) -> Vec<Chunk> {
 }
 
 impl AimFile {
+    #[cfg(not(target_os = "emscripten"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AimError> {
         let path_ref = path.as_ref();
         let display = path_ref.to_string_lossy().into_owned();
@@ -538,6 +561,14 @@ impl AimFile {
             path: display.clone(),
             source,
         })?;
+        Self::parse(display, Storage::Mapped(data))
+    }
+
+    pub fn from_bytes(path: impl Into<String>, data: Vec<u8>) -> Result<Self, AimError> {
+        Self::parse(path.into(), Storage::Owned(data.into_boxed_slice()))
+    }
+
+    fn parse(display: String, data: Storage) -> Result<Self, AimError> {
         let track = aimd_track(&data, &display)?;
         let first = track
             .samples
@@ -955,8 +986,11 @@ mod tests {
     fn reads_checked_in_aimd_fixture_with_all_gps_channels() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/synthetic_aimd.mp4");
-        let file = AimFile::open(path).unwrap();
+        let file = AimFile::open(&path).unwrap();
         assert_eq!(file.channels.len(), 16);
+        let bytes = std::fs::read(&path).unwrap();
+        let in_memory = AimFile::from_bytes("synthetic.mp4", bytes).unwrap();
+        assert_eq!(in_memory.channels.len(), 16);
         for name in [
             "GPS Latitude",
             "GPS Longitude",

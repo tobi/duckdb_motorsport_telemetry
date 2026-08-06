@@ -2,6 +2,14 @@
 
 Standalone Racelogic VBOX `.vbo` parser. It handles section-based files, optional column names and units, UTC time-of-day conversion, midnight rollover, irregular timestamps, and custom channels.
 
+## Library contract
+
+`VboFile::open(path)` memory-maps the local text file and parses its sections
+from borrowed slices; parsed numeric columns are then owned by `VboFile`.
+`VboFile::from_bytes(path, bytes)` and `VboFile::from_slice(path, bytes)` are
+the in-memory entry points. All constructors expose the same
+`TelemetrySource` contract.
+
 ```rust
 use motorsport_telemetry_core::TelemetrySource;
 use vbo_telemetry::VboFile;
