@@ -127,10 +127,10 @@ GROUP BY filename;
 
 ## Globs
 
-Recursive globs and `{pds,ld,vbo}` are supported:
+Recursive globs and `{pds,ld,vbo,mp4}` are supported:
 
 ```sql
-SELECT * FROM telemetry_metadata('weekend/**/*.{pds,ld,vbo}');
+SELECT * FROM telemetry_metadata('weekend/**/*.{pds,ld,vbo,mp4}');
 ```
 
 Quote globs in shell commands. Unknown extensions from broad globs are ignored; malformed files with a supported extension fail the bind. Small Pi `Telemetry/` snapshot PDS files are currently unsupported, so prefer `**/Offloaded/*.pds` for that corpus.
@@ -306,7 +306,7 @@ COPY (
 
 -- Check whether lateral acceleration was truly logged
 SELECT file, name, unit, frequency_hz, sample_count
-FROM telemetry_metadata('**/*.{pds,ld,vbo}')
+FROM telemetry_metadata('**/*.{pds,ld,vbo,mp4}')
 WHERE lower(name) LIKE '%accel%lat%' OR lower(name) IN ('glat', 'lateral g');
 ```
 

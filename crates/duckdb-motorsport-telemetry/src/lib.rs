@@ -171,17 +171,29 @@ fn parse_channel_filter(value: Option<&str>) -> HashSet<String> {
 }
 
 fn expand_paths(pattern: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
-    let patterns = if let Some(start) = pattern.find("{pds,ld,vbo}") {
-        ["pds", "ld", "vbo"]
+    let expansion = if let Some(start) = pattern.find("{pds,ld,vbo,mp4}") {
+        Some((
+            start,
+            "{pds,ld,vbo,mp4}".len(),
+            vec!["pds", "ld", "vbo", "mp4"],
+        ))
+    } else if let Some(start) = pattern.find("{pds,ld,vbo}") {
+        Some((start, "{pds,ld,vbo}".len(), vec!["pds", "ld", "vbo"]))
+    } else {
+        None
+    };
+    let patterns = if let Some((start, width, extensions)) = expansion {
+        extensions
+            .into_iter()
             .map(|extension| {
                 format!(
                     "{}{}{}",
                     &pattern[..start],
                     extension,
-                    &pattern[start + 12..]
+                    &pattern[start + width..]
                 )
             })
-            .to_vec()
+            .collect()
     } else {
         vec![pattern.to_owned()]
     };

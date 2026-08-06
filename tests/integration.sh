@@ -42,6 +42,7 @@ SELECT CASE WHEN (SELECT count(*) FROM read_aim('$aim_fixture', channels='RPM', 
 SELECT CASE WHEN (SELECT round(value, 6) FROM telemetry_samples('$aim_fixture', channel='GPS Speed')) = 0.137477 THEN true ELSE error('AiM GPS aggregate decode failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM telemetry_metadata('$aim_fixture') WHERE name LIKE 'GPS %' AND sample_count=1) = 15 THEN true ELSE error('AiM GPS channel set incomplete') END;
 SELECT CASE WHEN (SELECT list(DISTINCT format ORDER BY format) FROM telemetry_metadata('$fixture_dir/*')) = ['aimd', 'motec', 'pds', 'vbo'] THEN true ELSE error('mixed-format glob failed') END;
+SELECT CASE WHEN (SELECT list(DISTINCT format ORDER BY format) FROM telemetry_metadata('$fixture_dir/*.{pds,ld,vbo,mp4}')) = ['aimd', 'motec', 'pds', 'vbo'] THEN true ELSE error('mixed-format brace glob failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_cosworth('$fixture', channels='Speed', rate=1)) = 4 THEN true ELSE error('read_cosworth failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_motec('$motec_fixture', channels='Speed', rate=2)) = 4 THEN true ELSE error('read_motec failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_vbo('$vbo_fixture', channels='velocity kmh', rate=2)) = 4 THEN true ELSE error('read_vbo failed') END;
@@ -75,7 +76,7 @@ SELECT CASE WHEN (SELECT count(*) FROM telemetry_column_comments('$motec_fixture
 SELECT CASE WHEN (SELECT ddl FROM telemetry_column_comments('$motec_fixture', 'laps') WHERE column_name='Speed') LIKE 'COMMENT ON COLUMN %laps%.%Speed% IS ''unit=%' THEN true ELSE error('column comment DDL malformed') END;
 SELECT CASE WHEN (SELECT kv_metadata FROM telemetry_column_comments('$fixture', 'laps') WHERE column_name='Throttle Pos') LIKE '%native_frequency_hz=1; native_sample_period_ns=1000000000' THEN true ELSE error('native sample rate missing from column metadata') END;"
 results="$("$DUCKDB" -unsigned -csv -noheader -c "$sql")"
-[[ "$(grep -c '^true$' <<<"$results")" = 44 ]]
+[[ "$(grep -c '^true$' <<<"$results")" = 45 ]]
 
 # Inferred conversion is intentionally restricted to direct unit-tagged reader
 # columns. Scalars and expressions must use telemetry_convert(value, from, to).
