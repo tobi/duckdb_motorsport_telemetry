@@ -21,6 +21,10 @@ extension, `telemetry_metadata`, `telemetry_samples`, `read_telemetry`,
 not link the AiM parser, so `.mp4` inputs and the `read_aim`/`read_aimd`
 functions are unavailable in the browser.
 
+For session queries, the reader also indexes the native video track timeline.
+`video_frame_index` is derived from `mdhd`/`stts` and optional `ctts`
+composition offsets; it is not an AiM telemetry channel.
+
 The parser does not inspect video or audio payloads. It requires an `aimd`
 sample-entry track and rejects malformed sample tables, missing `amv0`
 signatures, duplicate scalar record IDs, and empty supported scalar streams.

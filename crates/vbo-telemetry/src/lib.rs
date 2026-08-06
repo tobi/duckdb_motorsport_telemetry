@@ -4,6 +4,21 @@ use std::fs::File;
 use std::path::Path;
 use thiserror::Error;
 
+pub fn read_metadata(
+    path: impl AsRef<Path>,
+) -> Result<motorsport_telemetry_core::FileMetadata, VboError> {
+    VboFile::open_mode(path, true)
+        .map(|file| motorsport_telemetry_core::read_source_metadata(&file))
+}
+
+pub fn read_metadata_from_bytes(
+    path: impl Into<String>,
+    data: Vec<u8>,
+) -> Result<motorsport_telemetry_core::FileMetadata, VboError> {
+    VboFile::from_slice_mode(path.into(), &data, true)
+        .map(|file| motorsport_telemetry_core::read_source_metadata(&file))
+}
+
 const BUILTIN_NAMES: [&str; 12] = [
     "satellites",
     "time",
@@ -61,6 +76,7 @@ pub struct VboFile {
     pub channels: Vec<Channel>,
     pub time_ns: Vec<u64>,
     values: Vec<Vec<f64>>,
+    absolute_start_ns: u64,
 }
 
 fn invalid(path: &str, message: impl Into<String>) -> VboError {
@@ -114,11 +130,43 @@ fn builtin_unit(name: &str) -> &'static str {
     }
 }
 
+fn metadata_channel(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase()
+            .replace([' ', '_', '-'], "")
+            .as_str(),
+        "time"
+            | "tsample"
+            | "driver"
+            | "driverid"
+            | "driverindex"
+            | "lap"
+            | "lapnumber"
+            | "lapcount"
+            | "lapcounter"
+            | "currentlaptime"
+            | "laptime"
+            | "laptimerunning"
+            | "previouslt"
+            | "previouslaptime"
+            | "lastlaptime"
+            | "reflaptime"
+            | "referencelaptime"
+            | "avifileindex"
+            | "avisynctime"
+            | "avitime"
+    )
+}
+
 impl VboFile {
     /// Memory-maps the file and parses straight out of the mapping. VBO is a
     /// text format, so the previous read-then-`String`-copy path held the whole
     /// session twice on the heap before parsing began.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, VboError> {
+        Self::open_mode(path, false)
+    }
+
+    fn open_mode(path: impl AsRef<Path>, metadata_only: bool) -> Result<Self, VboError> {
         let path = path.as_ref();
         let display = path.to_string_lossy().into_owned();
         let file = File::open(path).map_err(|source| VboError::Io {
@@ -133,15 +181,22 @@ impl VboFile {
             path: display.clone(),
             source,
         })?;
-        Self::from_slice(display, &mapping)
+        Self::from_slice_mode(display, &mapping, metadata_only)
     }
 
     pub fn from_bytes(path: impl Into<String>, bytes: Vec<u8>) -> Result<Self, VboError> {
-        Self::from_slice(path, &bytes)
+        Self::from_slice_mode(path.into(), &bytes, false)
     }
 
     pub fn from_slice(path: impl Into<String>, bytes: &[u8]) -> Result<Self, VboError> {
-        let display = path.into();
+        Self::from_slice_mode(path.into(), bytes, false)
+    }
+
+    fn from_slice_mode(
+        display: String,
+        bytes: &[u8],
+        metadata_only: bool,
+    ) -> Result<Self, VboError> {
         if bytes.is_empty() {
             return Err(invalid(&display, "empty file"));
         }
@@ -182,13 +237,31 @@ impl VboFile {
             return Err(invalid(&display, "no channel names"));
         }
         let count = short_names.len();
-        let mut values = vec![Vec::with_capacity(parsed.data.len()); count];
+        let selected = short_names
+            .iter()
+            .map(|name| !metadata_only || metadata_channel(name))
+            .collect::<Vec<_>>();
+        let mut values = selected
+            .iter()
+            .map(|selected| {
+                if *selected {
+                    Vec::with_capacity(parsed.data.len())
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect::<Vec<Vec<f64>>>();
+        let mut rows = 0usize;
         for line in &parsed.data {
             let tokens = line.split_whitespace().collect::<Vec<_>>();
             if tokens.len() < 2 {
                 continue;
             }
+            rows += 1;
             for (column, output) in values.iter_mut().enumerate() {
+                if !selected[column] {
+                    continue;
+                }
                 output.push(
                     tokens
                         .get(column)
@@ -197,7 +270,6 @@ impl VboFile {
                 );
             }
         }
-        let rows = values.first().map(Vec::len).unwrap_or(0);
         if rows == 0 {
             return Err(invalid(&display, "no valid data rows"));
         }
@@ -282,6 +354,7 @@ impl VboFile {
             channels,
             time_ns,
             values,
+            absolute_start_ns: (first * 1e9).round().max(0.0) as u64,
         })
     }
 }
@@ -298,6 +371,20 @@ impl TelemetrySource for VboFile {
     }
     fn decode(&self, channel_index: usize, _chunk_index: usize, local_index: u64) -> f64 {
         self.values[channel_index][local_index as usize]
+    }
+    fn absolute_time_range(&self) -> Option<motorsport_telemetry_core::AbsoluteTimeRange> {
+        let duration_ns = self
+            .channels
+            .iter()
+            .map(|channel| channel.duration_ns)
+            .max()
+            .unwrap_or(0);
+        Some(motorsport_telemetry_core::AbsoluteTimeRange {
+            clock: "time_of_day".into(),
+            start_ns: self.absolute_start_ns,
+            end_ns: self.absolute_start_ns.saturating_add(duration_ns),
+            session_hint: "vbo:time_of_day".into(),
+        })
     }
     fn sample_time_ns(&self, _channel_index: usize, _chunk_index: usize, local_index: u64) -> u64 {
         self.time_ns[local_index as usize]
@@ -342,6 +429,9 @@ mod tests {
         let in_memory =
             VboFile::from_bytes("fixture.vbo", std::fs::read(fixture.path()).unwrap()).unwrap();
         assert_eq!(in_memory.channels.len(), 2);
+        let metadata = read_metadata(fixture.path()).unwrap();
+        assert_eq!(metadata.channel_count, 2);
+        assert!(metadata.absolute_start_ns.is_some());
         assert_eq!(file.time_ns, [0, 500_000_000, 1_500_000_000]);
         assert_eq!(file.decode(1, 0, 2), 40.0);
         assert_eq!(file.sample_at(1, 1_000_000_000, true), Some(30.0));

@@ -93,6 +93,65 @@ not fabricated when its payload is absent. MP4, `read_aim`, and `read_aimd` are
 unavailable in the WASM/browser build because that build does not link the AiM
 parser.
 
+## Fast file and session metadata
+
+Use `telemetry_file_metadata` before opening a wide session. It returns one row
+per file with internal session clock/key, driver IDs, lap count, fastest
+complete lap, schema hash, and MP4 video-frame count:
+
+```sql
+SELECT file, session_key, driver_ids, lap_count,
+       fastest_lap_number, fastest_lap_time_ns, video_frame_count
+FROM telemetry_file_metadata('race/**/*.{pds,ld,vbo,mp4}')
+ORDER BY absolute_start_ns;
+```
+
+Group those rows into session-wide lap/stint metadata:
+
+```sql
+SELECT session_key, file_count, driver_ids, stint_count, lap_count,
+       fastest_lap_number, fastest_lap_time_ns
+FROM telemetry_session_metadata(
+  'race/**/*.mp4',
+  max_gap_seconds := 60
+);
+```
+
+Use `read_telemetry_session` to stitch internally continuous files without
+depending on filenames:
+
+```sql
+SELECT time_ns, source_file, file_time_ns,
+       video_file_index, video_frame_index, video_sync_time,
+       driver_id, lap_number, "GPS Speed"
+FROM read_telemetry_session(
+  'race/**/*.mp4',
+  rate := 20,
+  channels := 'GPS Speed',
+  max_gap_seconds := 60
+)
+ORDER BY time_ns;
+```
+
+For `read_telemetry_session`, `start_ns` and `end_ns` are session-relative
+bounds; the reader translates them to each source file's local clock.
+
+AiM sessions use GPS week/iTOW continuity. MoTeC uses embedded date/time and
+vehicle/venue identity. VBO uses its time-of-day clock and schema. If a glob
+contains multiple internally separate sessions, narrow it or lower
+`max_gap_seconds`; the reader errors rather than merging them.
+
+For AiM, `source_file` plus `video_frame_index` identifies the video frame. The
+frame index is derived from the MP4 video track timing table, not from a
+telemetry channel. VBO carries `avifileindex` and `avisynctime`, exposed as
+`video_file_index` and `video_sync_time`; do not invent a frame number when the
+format does not provide a frame timeline.
+
+Driver stints use internal driver-ID channels. Fastest-lap metadata prefers a
+reported previous-lap time validated against the reference lap, then falls
+back to complete interior timer/beacon/counter intervals. First and last
+fragments are excluded.
+
 ## Pushdown rules
 
 Always put physical selections in named arguments:

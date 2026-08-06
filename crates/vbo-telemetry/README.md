@@ -10,6 +10,11 @@ from borrowed slices; parsed numeric columns are then owned by `VboFile`.
 the in-memory entry points. All constructors expose the same
 `TelemetrySource` contract.
 
+`vbo_telemetry::read_metadata(path)` returns the shared `FileMetadata` summary,
+including the time-of-day clock, lap and driver channels when present, and the
+native AVI linkage fields. `read_metadata_from_bytes` provides the same summary
+for owned input.
+
 ```rust
 use motorsport_telemetry_core::TelemetrySource;
 use vbo_telemetry::VboFile;

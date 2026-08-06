@@ -183,7 +183,7 @@ One row per channel definition:
 SELECT file, format, count(*) AS definitions,
        count(*) FILTER (sample_count > 0) AS sampled_channels,
        sum(sample_count) AS raw_samples
-FROM telemetry_metadata('weekend/**/*.{pds,ld,vbo}')
+FROM telemetry_metadata('weekend/**/*.{pds,ld,vbo,mp4}')
 GROUP BY file, format;
 ```
 
@@ -191,10 +191,36 @@ Find lateral acceleration availability:
 
 ```sql
 SELECT file, name, unit, frequency_hz, sample_count
-FROM telemetry_metadata('**/*.{pds,ld,vbo}')
+FROM telemetry_metadata('**/*.{pds,ld,vbo,mp4}')
 WHERE lower(name) SIMILAR TO '%(lat|lateral)%(accel|g)%'
 ORDER BY file, name;
 ```
+
+### `telemetry_file_metadata(path)`
+
+Returns one summary row per file without materializing a wide telemetry table.
+The native parser uses its memory-mapped index and decodes only semantic
+channels needed for the summary:
+
+- internal driver IDs and driver transitions
+- embedded driver/vehicle/venue/event/session/date/time identity when available
+- absolute clock range and an internal session candidate key when available
+- channel/sample counts and a stable schema hash
+- lap count and fastest complete lap
+- native MP4 video-frame count
+
+```sql
+SELECT file, format, session_key, driver_ids, driver, vehicle, venue,
+       event, session, date, time, lap_count,
+       fastest_lap_number, fastest_lap_time_ns, video_frame_count
+FROM telemetry_file_metadata('race/**/*.{pds,ld,vbo,mp4}')
+ORDER BY absolute_start_ns;
+```
+
+Fastest-lap selection prefers the format's reported previous-lap time when
+available and validates it against the reference lap. Otherwise it uses
+interior beacon/timer/counter intervals. The first and last fragments are
+never selected, which excludes out laps, in laps, and file-edge chopped laps.
 
 ### `telemetry_samples(path, ...)`
 
@@ -282,6 +308,62 @@ Named arguments:
 Only floating-point source channels can be linearly interpolated. Every integer source channel always uses previous-value semantics, even when `interpolate := 'linear'`; known float-backed discrete/event channels—gear, lap number/beacon, switches, status, state, flags, alarms, GPS solution type—also remain stepwise. Use `interpolate := 'previous'` to make floating-point channels stepwise too.
 
 Across multiple files, schemas union by case-insensitive channel name. Missing channels are `NULL`.
+
+### `telemetry_session_metadata(path, ...)`
+
+Groups file summaries by internal clock continuity and returns session-wide file
+count, driver IDs/stints, lap count, and fastest complete lap:
+
+```sql
+SELECT session_key, file_count, driver_ids, stint_count, lap_count,
+       fastest_lap_number, fastest_lap_time_ns
+FROM telemetry_session_metadata(
+    'race/**/*.mp4',
+    max_gap_seconds := 60
+);
+```
+
+### `read_telemetry_session(path, ...)`
+
+Stitches internally continuous files onto one event clock. It does not use
+filenames. Session grouping uses:
+
+- AiM: GPS week + GPS `iTOW` + channel-schema signature
+- MoTeC: embedded date/time + vehicle + venue + schema signature
+- VBO: recorded time-of-day + schema signature
+
+Files are ordered by the internal clock and joined only when the gap is within
+`max_gap_seconds` (default 60). If a glob contains more than one session, the
+function errors instead of silently combining them.
+
+```sql
+SELECT time_ns, source_file, file_time_ns,
+       video_file_index, video_frame_index, video_sync_time,
+       driver_id, lap_number, "GPS Speed"
+FROM read_telemetry_session(
+    'race/**/*.mp4',
+    rate := 20,
+    channels := 'GPS Speed',
+    max_gap_seconds := 60
+)
+ORDER BY time_ns;
+```
+
+For this function, `start_ns` and `end_ns` are session-relative bounds and are
+translated into each source file's local clock before decoding.
+
+`time_ns` is the continuous event time and preserves real gaps between files;
+`file_time_ns` is local to the source recording. For AiM MP4, `source_file`
+plus `video_frame_index` identifies the exact video frame. There is no AiM
+telemetry channel carrying the frame number: it is derived from the MP4 video
+track's `mdhd`/`stts` timing and optional `ctts` composition offsets. VBO
+exposes its native `avifileindex`/`avisynctime` as
+`video_file_index`/`video_sync_time`; no frame number is invented without an
+internally available frame timeline.
+
+`driver_id` and `lap_number` come from internal telemetry channels, not the
+filename. The session relation therefore remains valid when recordings are
+renamed.
 
 Creation-date pruning happens before telemetry files are opened:
 

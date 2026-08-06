@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
+pub mod metadata;
 pub mod units;
 
+pub use metadata::{
+    driver_histogram, group_sessions, read_source_metadata, AbsoluteTimeRange, DriverStint,
+    FileMetadata, LapMetadata, SessionMetadata, SourceIdentity, VideoReference,
+};
 pub use units::{
     can_convert, convert, lookup as lookup_unit, normalize as normalize_unit, ConvertError,
     Dimension, UnitDef, UNITS,
@@ -162,6 +167,60 @@ pub trait TelemetrySource: Send + Sync {
     fn format(&self) -> &'static str;
     fn channels(&self) -> &[Channel];
     fn decode(&self, channel_index: usize, chunk_index: usize, local_index: u64) -> f64;
+
+    fn absolute_time_range(&self) -> Option<AbsoluteTimeRange> {
+        None
+    }
+
+    fn identity(&self) -> SourceIdentity {
+        SourceIdentity::default()
+    }
+
+    fn video_frame_count(&self) -> Option<u64> {
+        None
+    }
+
+    fn video_frame_at(&self, _time_ns: u64) -> Option<u64> {
+        None
+    }
+
+    fn video_reference_at(&self, time_ns: u64) -> VideoReference {
+        let file_index = self
+            .channels()
+            .iter()
+            .position(|channel| {
+                matches!(
+                    channel.name.to_ascii_lowercase().as_str(),
+                    "avifileindex" | "avi file index"
+                )
+            })
+            .and_then(|index| self.sample_at(index, time_ns, false))
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value.round() as u32);
+        let sync_time = self
+            .channels()
+            .iter()
+            .position(|channel| {
+                matches!(
+                    channel.name.to_ascii_lowercase().as_str(),
+                    "avisynctime" | "avitime" | "avi sync time"
+                )
+            })
+            .and_then(|index| self.sample_at(index, time_ns, false))
+            .filter(|value| value.is_finite());
+        VideoReference {
+            file_index,
+            sync_time,
+            frame_index: self.video_frame_at(time_ns),
+        }
+    }
+
+    fn metadata(&self) -> FileMetadata
+    where
+        Self: Sized,
+    {
+        read_source_metadata(self)
+    }
 
     fn sample_time_ns(&self, channel_index: usize, chunk_index: usize, local_index: u64) -> u64 {
         let chunk = &self.channels()[channel_index].chunks[chunk_index];

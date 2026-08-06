@@ -37,9 +37,14 @@ def packet_header(signature: bytes) -> bytearray:
     return bytearray(b"\x00\x00\x40\x00\x00\x00" + signature)
 
 
-def make_aimd() -> bytes:
+def make_aimd(itow_ms: int = 573_634_560, driver_id: float = 3.0, lap_number: float = 1.0) -> bytes:
     schema = packet_header(b"amv0s1")
-    for record_id, name, width in ((42, "RPM", 4), (55, "GPS0", 56)):
+    for record_id, name, width in (
+        (42, "RPM", 4),
+        (43, "DRIVER_ID", 4),
+        (44, "Lap_Number", 4),
+        (55, "GPS0", 56),
+    ):
         definition = channel_definition(record_id, name, width)
         schema.extend(b"<hCHS\x00")
         schema.extend(struct.pack("<I", len(definition)))
@@ -53,9 +58,15 @@ def make_aimd() -> bytes:
     values.extend(struct.pack("<H", 42))
     values.extend(struct.pack("<f", 1234.5))
     values.extend(b")")
+    for record_id, value in ((43, driver_id), (44, lap_number)):
+        values.extend(b"(S")
+        values.extend(struct.pack("<I", 100))
+        values.extend(struct.pack("<H", record_id))
+        values.extend(struct.pack("<f", value))
+        values.extend(b")")
     gps = bytearray(56)
     struct.pack_into("<I", gps, 0, 100)
-    struct.pack_into("<I", gps, 4, 573_634_560)
+    struct.pack_into("<I", gps, 4, itow_ms)
     struct.pack_into("<H", gps, 12, 2429)
     struct.pack_into("<3i", gps, 16, 16_174_352, -460_842_617, 439_210_627)
     struct.pack_into("<I", gps, 28, 783)
@@ -107,7 +118,29 @@ def make_aimd() -> bytes:
     )
     minf = mp4_box(b"minf", stbl)
     mdia = mp4_box(b"mdia", mp4_box(b"mdhd", mdhd) + mp4_box(b"hdlr", hdlr) + minf)
-    moov = mp4_box(b"moov", mp4_box(b"trak", mdia))
+    aimd_trak = mp4_box(b"trak", mdia)
+
+    video_mdhd = bytearray(24)
+    struct.pack_into(">I", video_mdhd, 12, 1000)
+    video_hdlr = bytearray(24)
+    video_hdlr[8:12] = b"vide"
+    video_stts = bytearray(16)
+    video_stts[7] = 1
+    video_stsd = bytearray(16)
+    video_stsd[7] = 1
+    struct.pack_into(">I", video_stsd, 8, 8)
+    video_stsd[12:16] = b"avc1"
+    struct.pack_into(">II", video_stts, 8, 3, 40)
+    video_stbl = mp4_box(
+        b"stbl", mp4_box(b"stsd", video_stsd) + mp4_box(b"stts", video_stts)
+    )
+    video_minf = mp4_box(b"minf", video_stbl)
+    video_mdia = mp4_box(
+        b"mdia",
+        mp4_box(b"mdhd", video_mdhd) + mp4_box(b"hdlr", video_hdlr) + video_minf,
+    )
+    video_trak = mp4_box(b"trak", video_mdia)
+    moov = mp4_box(b"moov", video_trak + aimd_trak)
     return ftyp + mdat + moov
 
 
@@ -236,6 +269,7 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
     files = {
         "synthetic_aimd.mp4": make_aimd(),
+        "synthetic_aimd_part2.mp4": make_aimd(573_634_760, 3.0, 1.0),
         "synthetic_cosworth.pds": make_pds(),
         "synthetic_motec.ld": make_motec(),
         "synthetic_vbo.vbo": make_vbo(),

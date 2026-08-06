@@ -19,7 +19,8 @@ use motec_telemetry::{
     motec_sidecar_path, write_motec_bytes, write_motec_ldx_bytes, MotecFile, MotecMetadata,
 };
 use motorsport_telemetry_core::{
-    units, Channel, SampleType, SourceRef, TelemetrySource, UnitSource,
+    group_sessions, read_source_metadata, units, Channel, FileMetadata, SampleType, SourceRef,
+    TelemetrySource, UnitSource,
 };
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -36,6 +37,7 @@ use vbo_telemetry::VboFile;
 pub(crate) const VECTOR_SIZE: u64 = 2048;
 const SAMPLES_COLUMN_COUNT: u64 = 10;
 const CHANNELS_COLUMN_COUNT: u64 = 15;
+const SESSION_FIXED_COLUMNS: u64 = 9;
 
 pub(crate) trait FlatVectorExt {
     fn typed_slice<T>(&mut self) -> &mut [T];
@@ -161,6 +163,19 @@ fn worker_count(tasks: usize) -> u64 {
     tasks.min(cpus).max(1) as u64
 }
 
+fn normalized_channel_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn matching_channel(source: &dyn TelemetrySource, names: &[&str]) -> Option<usize> {
+    source.channels().iter().position(|channel| {
+        channel.sample_count > 0 && names.contains(&normalized_channel_name(&channel.name).as_str())
+    })
+}
+
 fn parse_channel_filter(value: Option<&str>) -> HashSet<String> {
     value
         .unwrap_or("")
@@ -234,6 +249,7 @@ fn expand_paths(pattern: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     Ok(paths)
 }
 
+#[derive(Clone)]
 struct InputFile {
     source: SourceRef,
     create_date_micros: i64,
@@ -250,6 +266,7 @@ impl Deref for InputFile {
 #[derive(Clone, Copy)]
 struct ReaderConfig {
     format: Option<&'static str>,
+    session: bool,
 }
 
 fn system_time_micros(timestamp: Option<std::time::SystemTime>) -> i64 {
@@ -844,6 +861,316 @@ impl VTab for ChannelsVTab {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
+fn fast_file_metadata(pattern: &str) -> Result<Vec<FileMetadata>, Box<dyn Error>> {
+    expand_paths(pattern)?
+        .into_iter()
+        .map(|path| {
+            match path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "pds" => cosworth_telemetry::read_metadata(&path).map_err(Into::into),
+                "ld" => motec_telemetry::read_metadata(&path).map_err(Into::into),
+                "vbo" => vbo_telemetry::read_metadata(&path).map_err(Into::into),
+                "mp4" => aim_telemetry::read_metadata(&path).map_err(Into::into),
+                extension => Err(format!("unsupported telemetry extension {extension}").into()),
+            }
+        })
+        .collect()
+}
+
+// ── telemetry_file_metadata: one fast summary row per file ─────────
+
+struct FileMetadataBind {
+    metadata: Vec<FileMetadata>,
+}
+
+struct FileMetadataInit {
+    next: AtomicUsize,
+    projected: Vec<u64>,
+}
+
+struct FileMetadataVTab;
+
+impl VTab for FileMetadataVTab {
+    type BindData = FileMetadataBind;
+    type InitData = FileMetadataInit;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        #[cfg(not(target_os = "emscripten"))]
+        let metadata = fast_file_metadata(&bind.get_parameter(0).to_string())?;
+        #[cfg(target_os = "emscripten")]
+        let metadata = open_paths(bind, &bind.get_parameter(0).to_string(), None, None, None)?
+            .iter()
+            .map(|file| read_source_metadata(file.deref()))
+            .collect::<Vec<_>>();
+        for (name, logical) in [
+            ("file", LogicalTypeId::Varchar),
+            ("format", LogicalTypeId::Varchar),
+            ("session_key", LogicalTypeId::Varchar),
+            ("absolute_start_ns", LogicalTypeId::UBigint),
+            ("absolute_end_ns", LogicalTypeId::UBigint),
+            ("duration_ns", LogicalTypeId::UBigint),
+            ("channel_count", LogicalTypeId::UBigint),
+            ("sampled_channel_count", LogicalTypeId::UBigint),
+            ("sample_count", LogicalTypeId::UBigint),
+            ("schema_hash", LogicalTypeId::UBigint),
+            ("driver_ids", LogicalTypeId::Varchar),
+            ("lap_count", LogicalTypeId::UBigint),
+            ("fastest_lap_number", LogicalTypeId::Bigint),
+            ("fastest_lap_time_ns", LogicalTypeId::UBigint),
+            ("video_frame_count", LogicalTypeId::UBigint),
+            ("driver", LogicalTypeId::Varchar),
+            ("vehicle", LogicalTypeId::Varchar),
+            ("venue", LogicalTypeId::Varchar),
+            ("event", LogicalTypeId::Varchar),
+            ("session", LogicalTypeId::Varchar),
+            ("date", LogicalTypeId::Varchar),
+            ("time", LogicalTypeId::Varchar),
+            ("absolute_clock", LogicalTypeId::Varchar),
+        ] {
+            bind.add_result_column(name, ty(logical));
+        }
+        bind.set_cardinality(metadata.len() as u64, true);
+        Ok(FileMetadataBind { metadata })
+    }
+
+    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        let bind = unsafe { &*init.get_bind_data::<FileMetadataBind>() };
+        init.set_max_threads(worker_count(bind.metadata.len()));
+        Ok(FileMetadataInit {
+            next: AtomicUsize::new(0),
+            projected: projected(init, 23),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        let state = func.get_init_data();
+        let start = state
+            .next
+            .fetch_add(VECTOR_SIZE as usize, Ordering::Relaxed);
+        let bind = func.get_bind_data();
+        if start >= bind.metadata.len() {
+            output.set_len(0);
+            return Ok(());
+        }
+        let end = (start + VECTOR_SIZE as usize).min(bind.metadata.len());
+        let n = end - start;
+        for (out_col, original) in state.projected.iter().copied().enumerate() {
+            if out_col >= output.num_columns() {
+                break;
+            }
+            let mut vector = output.flat_vector(out_col);
+            for (row, metadata) in bind.metadata[start..end].iter().enumerate() {
+                match original {
+                    0 => vector.insert(row, metadata.path.as_str()),
+                    1 => vector.insert(row, metadata.format.as_str()),
+                    2 => match &metadata.session_key {
+                        Some(value) => vector.insert(row, value.as_str()),
+                        None => vector.set_null(row),
+                    },
+                    3 => match metadata.absolute_start_ns {
+                        Some(value) => vector.typed_slice::<u64>()[row] = value,
+                        None => vector.set_null(row),
+                    },
+                    4 => match metadata.absolute_end_ns {
+                        Some(value) => vector.typed_slice::<u64>()[row] = value,
+                        None => vector.set_null(row),
+                    },
+                    5 => vector.typed_slice::<u64>()[row] = metadata.duration_ns,
+                    6 => vector.typed_slice::<u64>()[row] = metadata.channel_count as u64,
+                    7 => vector.typed_slice::<u64>()[row] = metadata.sampled_channel_count as u64,
+                    8 => vector.typed_slice::<u64>()[row] = metadata.sample_count,
+                    9 => vector.typed_slice::<u64>()[row] = metadata.schema_hash,
+                    10 => {
+                        let value = metadata
+                            .driver_ids
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        vector.insert(row, value.as_str())
+                    }
+                    11 => vector.typed_slice::<u64>()[row] = metadata.laps.len() as u64,
+                    12 => match &metadata.fastest_lap {
+                        Some(lap) => vector.typed_slice::<i64>()[row] = lap.number,
+                        None => vector.set_null(row),
+                    },
+                    13 => match &metadata.fastest_lap {
+                        Some(lap) => vector.typed_slice::<u64>()[row] = lap.duration_ns,
+                        None => vector.set_null(row),
+                    },
+                    14 => match metadata.video_frame_count {
+                        Some(value) => vector.typed_slice::<u64>()[row] = value,
+                        None => vector.set_null(row),
+                    },
+                    15 => vector.insert(row, metadata.identity.driver.as_str()),
+                    16 => vector.insert(row, metadata.identity.vehicle.as_str()),
+                    17 => vector.insert(row, metadata.identity.venue.as_str()),
+                    18 => vector.insert(row, metadata.identity.event.as_str()),
+                    19 => vector.insert(row, metadata.identity.session.as_str()),
+                    20 => vector.insert(row, metadata.identity.date.as_str()),
+                    21 => vector.insert(row, metadata.identity.time.as_str()),
+                    22 => match &metadata.absolute_clock {
+                        Some(value) => vector.insert(row, value.as_str()),
+                        None => vector.set_null(row),
+                    },
+                    _ => unreachable!(),
+                }
+            }
+        }
+        output.set_len(n);
+        Ok(())
+    }
+
+    fn supports_pushdown() -> bool {
+        true
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        Some(vec![ty(LogicalTypeId::Varchar)])
+    }
+}
+
+// ── telemetry_session_metadata: grouped multi-file summaries ───────
+
+struct SessionMetadataBind {
+    sessions: Vec<motorsport_telemetry_core::SessionMetadata>,
+    files: Vec<FileMetadata>,
+}
+
+struct SessionMetadataInit {
+    next: AtomicUsize,
+    projected: Vec<u64>,
+}
+
+struct SessionMetadataVTab;
+
+impl VTab for SessionMetadataVTab {
+    type BindData = SessionMetadataBind;
+    type InitData = SessionMetadataInit;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        #[cfg(not(target_os = "emscripten"))]
+        let files = fast_file_metadata(&bind.get_parameter(0).to_string())?;
+        #[cfg(target_os = "emscripten")]
+        let files = open_paths(bind, &bind.get_parameter(0).to_string(), None, None, None)?
+            .iter()
+            .map(|file| read_source_metadata(file.deref()))
+            .collect::<Vec<_>>();
+        let max_gap_seconds = named_i64(bind, "max_gap_seconds").unwrap_or(60);
+        if !(0..=86_400).contains(&max_gap_seconds) {
+            return Err("max_gap_seconds must be between 0 and 86400".into());
+        }
+        let sessions = group_sessions(&files, max_gap_seconds as u64 * 1_000_000_000);
+        for (name, logical) in [
+            ("session_key", LogicalTypeId::Varchar),
+            ("file_count", LogicalTypeId::UBigint),
+            ("absolute_start_ns", LogicalTypeId::UBigint),
+            ("absolute_end_ns", LogicalTypeId::UBigint),
+            ("duration_ns", LogicalTypeId::UBigint),
+            ("driver_ids", LogicalTypeId::Varchar),
+            ("stint_count", LogicalTypeId::UBigint),
+            ("lap_count", LogicalTypeId::UBigint),
+            ("fastest_lap_number", LogicalTypeId::Bigint),
+            ("fastest_lap_time_ns", LogicalTypeId::UBigint),
+        ] {
+            bind.add_result_column(name, ty(logical));
+        }
+        bind.set_cardinality(sessions.len() as u64, true);
+        Ok(SessionMetadataBind { sessions, files })
+    }
+
+    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        Ok(SessionMetadataInit {
+            next: AtomicUsize::new(0),
+            projected: projected(init, 10),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        let state = func.get_init_data();
+        let start = state
+            .next
+            .fetch_add(VECTOR_SIZE as usize, Ordering::Relaxed);
+        let bind = func.get_bind_data();
+        if start >= bind.sessions.len() {
+            output.set_len(0);
+            return Ok(());
+        }
+        let end = (start + VECTOR_SIZE as usize).min(bind.sessions.len());
+        let n = end - start;
+        for (out_col, original) in state.projected.iter().copied().enumerate() {
+            if out_col >= output.num_columns() {
+                break;
+            }
+            let mut vector = output.flat_vector(out_col);
+            for (row, session) in bind.sessions[start..end].iter().enumerate() {
+                match original {
+                    0 => vector.insert(row, session.session_key.as_str()),
+                    1 => vector.typed_slice::<u64>()[row] = session.files.len() as u64,
+                    2 => match session.absolute_start_ns {
+                        Some(value) => vector.typed_slice::<u64>()[row] = value,
+                        None => vector.set_null(row),
+                    },
+                    3 => match session.absolute_end_ns {
+                        Some(value) => vector.typed_slice::<u64>()[row] = value,
+                        None => vector.set_null(row),
+                    },
+                    4 => vector.typed_slice::<u64>()[row] = session.duration_ns,
+                    5 => {
+                        let value = session
+                            .files
+                            .iter()
+                            .flat_map(|index| bind.files[*index].driver_ids.iter().copied())
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .map(|driver| driver.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        vector.insert(row, value.as_str())
+                    }
+                    6 => vector.typed_slice::<u64>()[row] = session.driver_stints.len() as u64,
+                    7 => vector.typed_slice::<u64>()[row] = session.laps.len() as u64,
+                    8 => match &session.fastest_lap {
+                        Some(lap) => vector.typed_slice::<i64>()[row] = lap.number,
+                        None => vector.set_null(row),
+                    },
+                    9 => match &session.fastest_lap {
+                        Some(lap) => vector.typed_slice::<u64>()[row] = lap.duration_ns,
+                        None => vector.set_null(row),
+                    },
+                    _ => unreachable!(),
+                }
+            }
+        }
+        output.set_len(n);
+        Ok(())
+    }
+
+    fn supports_pushdown() -> bool {
+        true
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        Some(vec![ty(LogicalTypeId::Varchar)])
+    }
+
+    fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+        Some(vec![("max_gap_seconds".into(), ty(LogicalTypeId::Bigint))])
+    }
+}
+
 // ── read_telemetry: projected, resampled wide relation ─────────────
 
 struct WideBind {
@@ -864,6 +1191,11 @@ struct WideBind {
     map: ChannelMap,
     /// Per wide column, the (scale, offset) to apply. None = pass through.
     conversions: Vec<Option<(f64, f64)>>,
+    session_mode: bool,
+    session_key: String,
+    session_offsets_ns: Vec<i128>,
+    driver_channels: Vec<Option<usize>>,
+    lap_channels: Vec<Option<usize>>,
 }
 
 #[derive(Clone, Copy)]
@@ -891,13 +1223,46 @@ impl VTab for WideVTab {
         if matches!((create_date_from, create_date_to), (Some(from), Some(to)) if to < from) {
             return Err("create_date_to must be greater than or equal to create_date_from".into());
         }
-        let files = open_paths(
+        let mut files = open_paths(
             bind,
             &pattern,
             config.format,
             create_date_from,
             create_date_to,
         )?;
+        let mut metadata = files
+            .iter()
+            .map(|file| read_source_metadata(file.deref()))
+            .collect::<Vec<_>>();
+        let mut session_key = String::new();
+        let mut session_base_ns = 0u64;
+        if config.session {
+            let max_gap_seconds = named_i64(bind, "max_gap_seconds").unwrap_or(60);
+            if !(0..=86_400).contains(&max_gap_seconds) {
+                return Err("max_gap_seconds must be between 0 and 86400".into());
+            }
+            let sessions = group_sessions(&metadata, max_gap_seconds as u64 * 1_000_000_000);
+            if sessions.len() != 1 {
+                return Err(format!(
+                    "read_telemetry_session matched {} sessions; narrow the glob or adjust max_gap_seconds",
+                    sessions.len()
+                )
+                .into());
+            }
+            let session = &sessions[0];
+            session_key = session.session_key.clone();
+            session_base_ns = session.absolute_start_ns.unwrap_or(0);
+            files = session
+                .files
+                .iter()
+                .map(|index| files[*index].clone())
+                .collect();
+            metadata = session
+                .files
+                .iter()
+                .map(|index| metadata[*index].clone())
+                .collect();
+        }
         let rate = named_i64(bind, "rate").unwrap_or(100);
         if !(1..=5000).contains(&rate) {
             return Err("rate must be between 1 and 5000 Hz".into());
@@ -977,16 +1342,32 @@ impl VTab for WideVTab {
             })
             .collect();
 
-        if include_filename {
-            bind.add_result_column("filename", ty(LogicalTypeId::Varchar));
+        if config.session {
+            for (name, logical) in [
+                ("session_key", LogicalTypeId::Varchar),
+                ("time_ns", LogicalTypeId::Bigint),
+                ("file_time_ns", LogicalTypeId::Bigint),
+                ("source_file", LogicalTypeId::Varchar),
+                ("video_file_index", LogicalTypeId::UInteger),
+                ("video_frame_index", LogicalTypeId::UBigint),
+                ("video_sync_time", LogicalTypeId::Double),
+                ("driver_id", LogicalTypeId::Bigint),
+                ("lap_number", LogicalTypeId::Bigint),
+            ] {
+                bind.add_result_column(name, ty(logical));
+            }
+        } else {
+            if include_filename {
+                bind.add_result_column("filename", ty(LogicalTypeId::Varchar));
+            }
+            if include_create_date {
+                bind.add_result_column("create_date", ty(LogicalTypeId::Timestamp));
+            }
+            if include_modified_at {
+                bind.add_result_column("modified_at", ty(LogicalTypeId::Timestamp));
+            }
+            bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
         }
-        if include_create_date {
-            bind.add_result_column("create_date", ty(LogicalTypeId::Timestamp));
-        }
-        if include_modified_at {
-            bind.add_result_column("modified_at", ty(LogicalTypeId::Timestamp));
-        }
-        bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
         // Wide telemetry columns remain physically DOUBLE, but known units are
         // carried as logical aliases. telemetry_convert_column() reads this
         // tag, while ordinary DuckDB arithmetic continues to work normally.
@@ -1026,6 +1407,30 @@ impl VTab for WideVTab {
                     .collect()
             })
             .collect::<Vec<Vec<Option<usize>>>>();
+        let session_offsets_ns = metadata
+            .iter()
+            .map(|file| file.clock_offset_ns.unwrap_or(0) - i128::from(session_base_ns))
+            .collect::<Vec<_>>();
+        let driver_channels = files
+            .iter()
+            .map(|file| matching_channel(file.deref(), &["driverid", "driver", "driverindex"]))
+            .collect::<Vec<_>>();
+        let lap_channels = files
+            .iter()
+            .map(|file| {
+                matching_channel(
+                    file.deref(),
+                    &[
+                        "lapnumber",
+                        "lapnum",
+                        "lapcount",
+                        "lapcounter",
+                        "currentlap",
+                        "lap",
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
 
         let mut ranges = Vec::with_capacity(files.len());
         let mut total_rows = 0u64;
@@ -1036,13 +1441,22 @@ impl VTab for WideVTab {
                 .map(|&ci| file.channels()[ci].duration_ns)
                 .max()
                 .unwrap_or(0);
-            let end = requested_end.min(duration);
-            let rows = if end <= start_ns {
+            let (local_start, local_requested_end) = if config.session {
+                let offset = u64::try_from(session_offsets_ns[fi]).unwrap_or(0);
+                (
+                    start_ns.saturating_sub(offset),
+                    requested_end.saturating_sub(offset),
+                )
+            } else {
+                (start_ns, requested_end)
+            };
+            let end = local_requested_end.min(duration);
+            let rows = if end <= local_start {
                 0
             } else {
-                ((end - start_ns) as u128 * rate as u128).div_ceil(1_000_000_000) as u64
+                ((end - local_start) as u128 * rate as u128).div_ceil(1_000_000_000) as u64
             };
-            ranges.push((start_ns, end, rows));
+            ranges.push((local_start, end, rows));
             total_rows = total_rows.saturating_add(rows);
         }
         bind.set_cardinality(total_rows, true);
@@ -1058,6 +1472,11 @@ impl VTab for WideVTab {
             include_modified_at,
             map: channel_map,
             conversions,
+            session_mode: config.session,
+            session_key,
+            session_offsets_ns,
+            driver_channels,
+            lap_channels,
         })
     }
 
@@ -1077,10 +1496,13 @@ impl VTab for WideVTab {
             }
         }
         init.set_max_threads(worker_count(segments.len()));
-        let fixed_columns = 1
-            + usize::from(bind.include_filename)
-            + usize::from(bind.include_create_date)
-            + usize::from(bind.include_modified_at);
+        let fixed_columns = if bind.session_mode {
+            SESSION_FIXED_COLUMNS as usize
+        } else {
+            1 + usize::from(bind.include_filename)
+                + usize::from(bind.include_create_date)
+                + usize::from(bind.include_modified_at)
+        };
         Ok(WideInit {
             next: AtomicUsize::new(0),
             segments,
@@ -1105,6 +1527,110 @@ impl VTab for WideVTab {
         for (out_col, original) in state.projected.iter().copied().enumerate() {
             if out_col >= output.num_columns() {
                 break;
+            }
+            if bind.session_mode {
+                let file_time_ns = |row: usize| {
+                    let source_row = segment.row_start + row as u64;
+                    (start_ns as u128 + source_row as u128 * 1_000_000_000u128 / bind.rate as u128)
+                        as u64
+                };
+                match original {
+                    0 => {
+                        let vector = output.flat_vector(out_col);
+                        for row in 0..n {
+                            vector.insert(row, bind.session_key.as_str());
+                        }
+                    }
+                    1 => {
+                        let offset = bind.session_offsets_ns[segment.file];
+                        let mut vector = output.flat_vector(out_col);
+                        let dst = &mut vector.typed_slice::<i64>()[..n];
+                        for (row, value) in dst.iter_mut().enumerate() {
+                            *value = i64::try_from(i128::from(file_time_ns(row)) + offset)
+                                .unwrap_or(i64::MAX);
+                        }
+                    }
+                    2 => {
+                        let mut vector = output.flat_vector(out_col);
+                        let dst = &mut vector.typed_slice::<i64>()[..n];
+                        for (row, value) in dst.iter_mut().enumerate() {
+                            *value = file_time_ns(row) as i64;
+                        }
+                    }
+                    3 => {
+                        let vector = output.flat_vector(out_col);
+                        for row in 0..n {
+                            vector.insert(row, file.path());
+                        }
+                    }
+                    4..=6 => {
+                        let mut vector = output.flat_vector(out_col);
+                        for row in 0..n {
+                            let reference = file.video_reference_at(file_time_ns(row));
+                            match original {
+                                4 => match reference.file_index {
+                                    Some(value) => vector.typed_slice::<u32>()[row] = value,
+                                    None => vector.set_null(row),
+                                },
+                                5 => match reference.frame_index {
+                                    Some(value) => vector.typed_slice::<u64>()[row] = value,
+                                    None => vector.set_null(row),
+                                },
+                                6 => match reference.sync_time {
+                                    Some(value) => vector.typed_slice::<f64>()[row] = value,
+                                    None => vector.set_null(row),
+                                },
+                                _ => unreachable!(),
+                            }
+                        }
+                    }
+                    7 | 8 => {
+                        let channel_index = if original == 7 {
+                            bind.driver_channels[segment.file]
+                        } else {
+                            bind.lap_channels[segment.file]
+                        };
+                        let mut vector = output.flat_vector(out_col);
+                        for row in 0..n {
+                            match channel_index
+                                .and_then(|index| file.sample_at(index, file_time_ns(row), false))
+                                .filter(|value| value.is_finite())
+                            {
+                                Some(value) => {
+                                    vector.typed_slice::<i64>()[row] = value.round() as i64
+                                }
+                                None => vector.set_null(row),
+                            }
+                        }
+                    }
+                    col if col >= SESSION_FIXED_COLUMNS
+                        && (col - SESSION_FIXED_COLUMNS) < bind.names.len() as u64 =>
+                    {
+                        let wide_idx = (col - SESSION_FIXED_COLUMNS) as usize;
+                        let mut vector = output.flat_vector(out_col);
+                        if let Some(channel_idx) = bind.source_channels[segment.file][wide_idx] {
+                            let conversion = bind.conversions.get(wide_idx).copied().flatten();
+                            for row in 0..n {
+                                if let Some(value) =
+                                    file.sample_at(channel_idx, file_time_ns(row), bind.linear)
+                                {
+                                    vector.typed_slice::<f64>()[row] = match conversion {
+                                        Some((scale, offset)) => value * scale + offset,
+                                        None => value,
+                                    };
+                                } else {
+                                    vector.set_null(row);
+                                }
+                            }
+                        } else {
+                            for row in 0..n {
+                                vector.set_null(row);
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                continue;
             }
             let create_date_column = u64::from(bind.include_filename);
             let modified_at_column = create_date_column + u64::from(bind.include_create_date);
@@ -1184,6 +1710,7 @@ impl VTab for WideVTab {
             ("start_ns".into(), ty(LogicalTypeId::Bigint)),
             ("end_ns".into(), ty(LogicalTypeId::Bigint)),
             ("interpolate".into(), ty(LogicalTypeId::Varchar)),
+            ("max_gap_seconds".into(), ty(LogicalTypeId::Bigint)),
             ("filename".into(), ty(LogicalTypeId::Boolean)),
             ("add_filename_as_column".into(), ty(LogicalTypeId::Boolean)),
             ("timestamps".into(), ty(LogicalTypeId::Boolean)),
@@ -1755,39 +2282,56 @@ impl VTab for WriteVTab {
 )]
 pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<ChannelsVTab>("telemetry_metadata")?;
+    con.register_table_function::<SessionMetadataVTab>("telemetry_session_metadata")?;
+    con.register_table_function::<FileMetadataVTab>("telemetry_file_metadata")?;
     con.register_table_function::<SamplesVTab>("telemetry_samples")?;
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_telemetry",
-        &ReaderConfig { format: None },
+        &ReaderConfig {
+            format: None,
+            session: false,
+        },
+    )?;
+    con.register_table_function_with_extra_info::<WideVTab, _>(
+        "read_telemetry_session",
+        &ReaderConfig {
+            format: None,
+            session: true,
+        },
     )?;
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_aim",
         &ReaderConfig {
             format: Some("aimd"),
+            session: false,
         },
     )?;
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_aimd",
         &ReaderConfig {
             format: Some("aimd"),
+            session: false,
         },
     )?;
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_cosworth",
         &ReaderConfig {
             format: Some("pds"),
+            session: false,
         },
     )?;
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_motec",
         &ReaderConfig {
             format: Some("motec"),
+            session: false,
         },
     )?;
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_vbo",
         &ReaderConfig {
             format: Some("vbo"),
+            session: false,
         },
     )?;
     con.register_table_function::<WriteVTab>("write_telemetry")?;

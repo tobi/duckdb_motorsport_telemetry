@@ -9,11 +9,16 @@ SELECT count(*)
 FROM duckdb_functions()
 WHERE function_name IN (
   'telemetry_metadata',
+  'telemetry_file_metadata',
+  'telemetry_session_metadata',
   'telemetry_samples',
   'read_telemetry',
+  'read_telemetry_session',
+  'read_aim',
+  'read_aimd',
   'read_cosworth',
   'read_motec',
   'read_vbo'
 );
 ----
-6
+11

@@ -20,6 +20,11 @@ The standalone library exposes `AimFile::open(path)` for local native MP4s;
 it memory-maps the file. `AimFile::from_bytes(path, bytes)` is the equivalent
 owned-buffer constructor for callers that already have MP4 bytes.
 
+`aim_telemetry::read_metadata(path)` returns a fast `FileMetadata` summary,
+including internal driver IDs, lap information, GPS session clock, schema hash,
+and video-frame count. `read_metadata_from_bytes` provides the same summary for
+owned input.
+
 ## DuckDB integration
 
 The native DuckDB adapter exposes this parser through:

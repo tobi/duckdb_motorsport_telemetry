@@ -17,3 +17,15 @@ Native `open(path)` methods memory-map local files where the format supports it.
 `from_bytes(path, bytes)` is the in-memory entry point for embedded callers and
 WASM-compatible parsers. The core crate itself performs no file I/O and owns no
 format-specific parser.
+
+## Fast metadata and sessions
+
+`read_source_metadata(&source)` returns a format-neutral `FileMetadata`
+summary: counts, schema hash, internal driver IDs/stints, lap fragments,
+fastest complete lap, absolute clock range/session candidate key, and video
+frame count when available.
+
+`group_sessions(&files, max_gap_ns)` orders files by internal clocks and groups
+only adjacent compatible candidates. It merges driver and lap fragments across
+file boundaries while preserving real gaps. Filenames are never part of the
+identity.

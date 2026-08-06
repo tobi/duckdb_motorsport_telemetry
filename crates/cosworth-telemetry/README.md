@@ -10,6 +10,11 @@ buffer for callers that already have the file bytes. Both constructors return
 the same `CosworthFile` and `TelemetrySource` behavior; choose `open` for
 native files and `from_bytes` for embedded input.
 
+`cosworth_telemetry::read_metadata(path)` returns the shared `FileMetadata`
+summary without DuckDB; `read_metadata_from_bytes` is the owned-buffer form.
+PDS has no universally reliable absolute session key, so that field remains
+empty unless the format exposes one.
+
 ```rust
 use motorsport_telemetry_core::TelemetrySource;
 use cosworth_telemetry::CosworthFile;

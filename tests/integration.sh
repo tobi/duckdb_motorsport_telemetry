@@ -8,8 +8,10 @@ fixture="$fixture_dir/synthetic.pds"
 motec_fixture="$fixture_dir/synthetic.ld"
 vbo_fixture="$fixture_dir/synthetic.vbo"
 aim_fixture="$fixture_dir/synthetic.mp4"
+aim_fixture_2="$fixture_dir/synthetic_part2.mp4"
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cp "$root_dir/tests/fixtures/synthetic_aimd.mp4" "$aim_fixture"
+cp "$root_dir/tests/fixtures/synthetic_aimd_part2.mp4" "$aim_fixture_2"
 cp "$root_dir/tests/fixtures/synthetic_cosworth.pds" "$fixture"
 cp "$root_dir/tests/fixtures/synthetic_motec.ld" "$motec_fixture"
 cp "$root_dir/tests/fixtures/synthetic_vbo.vbo" "$vbo_fixture"
@@ -43,6 +45,10 @@ SELECT CASE WHEN (SELECT round(value, 6) FROM telemetry_samples('$aim_fixture', 
 SELECT CASE WHEN (SELECT count(*) FROM telemetry_metadata('$aim_fixture') WHERE name LIKE 'GPS %' AND sample_count=1) = 15 THEN true ELSE error('AiM GPS channel set incomplete') END;
 SELECT CASE WHEN (SELECT list(DISTINCT format ORDER BY format) FROM telemetry_metadata('$fixture_dir/*')) = ['aimd', 'motec', 'pds', 'vbo'] THEN true ELSE error('mixed-format glob failed') END;
 SELECT CASE WHEN (SELECT list(DISTINCT format ORDER BY format) FROM telemetry_metadata('$fixture_dir/*.{pds,ld,vbo,mp4}')) = ['aimd', 'motec', 'pds', 'vbo'] THEN true ELSE error('mixed-format brace glob failed') END;
+SELECT CASE WHEN (SELECT count(DISTINCT source_file) FROM read_telemetry_session('$fixture_dir/*.mp4', rate=10, channels='RPM,GPS Speed', max_gap_seconds=1)) = 2 THEN true ELSE error('multi-file Aim session grouping failed') END;
+SELECT CASE WHEN (SELECT [video_frame_index,driver_id,lap_number] FROM read_telemetry_session('$aim_fixture', rate=10, channels='RPM') LIMIT 1) = [0,3,1] THEN true ELSE error('Aim video frame/session context failed') END;
+SELECT CASE WHEN (SELECT [count(*),min(time_ns),min(file_time_ns)] FROM read_telemetry_session('$fixture_dir/*.mp4', rate=10, channels='RPM', start_ns=150000000, end_ns=300000000, max_gap_seconds=1)) = [1,200000000,0] THEN true ELSE error('session-relative pruning failed') END;
+SELECT CASE WHEN (SELECT count(*) FROM read_telemetry_session('$vbo_fixture', rate=2, channels='velocity kmh') WHERE video_file_index=0 AND video_sync_time=0 AND video_frame_index IS NULL) = 4 THEN true ELSE error('VBO video linkage failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_cosworth('$fixture', channels='Speed', rate=1)) = 4 THEN true ELSE error('read_cosworth failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_motec('$motec_fixture', channels='Speed', rate=2)) = 4 THEN true ELSE error('read_motec failed') END;
 SELECT CASE WHEN (SELECT count(*) FROM read_vbo('$vbo_fixture', channels='velocity kmh', rate=2)) = 4 THEN true ELSE error('read_vbo failed') END;
@@ -76,7 +82,7 @@ SELECT CASE WHEN (SELECT count(*) FROM telemetry_column_comments('$motec_fixture
 SELECT CASE WHEN (SELECT ddl FROM telemetry_column_comments('$motec_fixture', 'laps') WHERE column_name='Speed') LIKE 'COMMENT ON COLUMN %laps%.%Speed% IS ''unit=%' THEN true ELSE error('column comment DDL malformed') END;
 SELECT CASE WHEN (SELECT kv_metadata FROM telemetry_column_comments('$fixture', 'laps') WHERE column_name='Throttle Pos') LIKE '%native_frequency_hz=1; native_sample_period_ns=1000000000' THEN true ELSE error('native sample rate missing from column metadata') END;"
 results="$("$DUCKDB" -unsigned -csv -noheader -c "$sql")"
-[[ "$(grep -c '^true$' <<<"$results")" = 45 ]]
+[[ "$(grep -c '^true$' <<<"$results")" = 49 ]]
 
 # Inferred conversion is intentionally restricted to direct unit-tagged reader
 # columns. Scalars and expressions must use telemetry_convert(value, from, to).

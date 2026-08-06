@@ -12,6 +12,21 @@ use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource, Uni
 use std::collections::HashMap;
 #[cfg(not(target_os = "emscripten"))]
 use std::{fs::File, path::Path};
+
+#[cfg(not(target_os = "emscripten"))]
+pub fn read_metadata(
+    path: impl AsRef<Path>,
+) -> Result<motorsport_telemetry_core::FileMetadata, AimError> {
+    AimFile::open(path).map(|file| motorsport_telemetry_core::read_source_metadata(&file))
+}
+
+pub fn read_metadata_from_bytes(
+    path: impl Into<String>,
+    data: Vec<u8>,
+) -> Result<motorsport_telemetry_core::FileMetadata, AimError> {
+    AimFile::from_bytes(path, data)
+        .map(|file| motorsport_telemetry_core::read_source_metadata(&file))
+}
 use thiserror::Error;
 
 const AIMD: &[u8; 4] = b"aimd";
@@ -245,6 +260,94 @@ fn aimd_track(data: &[u8], path: &str) -> Result<TrackSamples, AimError> {
     Err(AimError::NoAimdTrack { path: path.into() })
 }
 
+fn video_frame_times_ns(data: &[u8], path: &str) -> Result<Vec<u64>, AimError> {
+    let Some(moov) = boxes(data, 0, data.len()).find(|item| &item.kind == b"moov") else {
+        return Ok(Vec::new());
+    };
+    for trak in boxes(data, moov.payload, moov.end).filter(|item| &item.kind == b"trak") {
+        let Some(mdia) = child(data, trak, b"mdia") else {
+            continue;
+        };
+        let Some(hdlr) = child(data, mdia, b"hdlr") else {
+            continue;
+        };
+        if data.get(hdlr.payload + 8..hdlr.payload + 12) != Some(b"vide") {
+            continue;
+        }
+        let mdhd =
+            child(data, mdia, b"mdhd").ok_or_else(|| invalid(path, "video track has no mdhd"))?;
+        let version = *data
+            .get(mdhd.payload)
+            .ok_or_else(|| invalid(path, "truncated video mdhd"))?;
+        let timescale_at = mdhd.payload + if version == 1 { 20 } else { 12 };
+        let timescale = be32(data, timescale_at)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| invalid(path, "invalid video timescale"))?;
+        let minf =
+            child(data, mdia, b"minf").ok_or_else(|| invalid(path, "video track has no minf"))?;
+        let stbl =
+            child(data, minf, b"stbl").ok_or_else(|| invalid(path, "video track has no stbl"))?;
+        let stts =
+            child(data, stbl, b"stts").ok_or_else(|| invalid(path, "video track has no stts"))?;
+        let count = be32(data, stts.payload + 4)
+            .ok_or_else(|| invalid(path, "truncated video stts"))? as usize;
+        let mut decode_times = Vec::new();
+        let mut time = 0u64;
+        for index in 0..count {
+            let at = stts.payload + 8 + index * 8;
+            let samples =
+                be32(data, at).ok_or_else(|| invalid(path, "truncated video stts entries"))?;
+            let delta =
+                be32(data, at + 4).ok_or_else(|| invalid(path, "truncated video stts entries"))?;
+            decode_times.reserve(samples as usize);
+            for _ in 0..samples {
+                decode_times.push(time);
+                time = time.saturating_add(u64::from(delta));
+            }
+        }
+        let mut composition_offsets = vec![0i64; decode_times.len()];
+        if let Some(ctts) = child(data, stbl, b"ctts") {
+            let version = *data
+                .get(ctts.payload)
+                .ok_or_else(|| invalid(path, "truncated video ctts"))?;
+            let entries = be32(data, ctts.payload + 4)
+                .ok_or_else(|| invalid(path, "truncated video ctts"))?
+                as usize;
+            let mut sample = 0usize;
+            for index in 0..entries {
+                let at = ctts.payload + 8 + index * 8;
+                let count = be32(data, at)
+                    .ok_or_else(|| invalid(path, "truncated video ctts entries"))?
+                    as usize;
+                let raw = be32(data, at + 4)
+                    .ok_or_else(|| invalid(path, "truncated video ctts entries"))?;
+                let offset = if version == 1 {
+                    i64::from(i32::from_be_bytes(raw.to_be_bytes()))
+                } else {
+                    i64::from(raw)
+                };
+                let end = sample.saturating_add(count).min(composition_offsets.len());
+                composition_offsets[sample..end].fill(offset);
+                sample = end;
+            }
+            if sample != composition_offsets.len() {
+                return Err(invalid(path, "ctts/stts sample counts differ"));
+            }
+        }
+        let mut timestamps = decode_times
+            .into_iter()
+            .zip(composition_offsets)
+            .map(|(decode, offset)| {
+                let presentation = (i128::from(decode) + i128::from(offset)).max(0) as u128;
+                (presentation * 1_000_000_000u128 / timescale as u128) as u64
+            })
+            .collect::<Vec<_>>();
+        timestamps.sort_unstable();
+        return Ok(timestamps);
+    }
+    Ok(Vec::new())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SampleRef {
     value_offset: u64,
@@ -313,6 +416,7 @@ pub struct AimFile {
     pub channels: Vec<Channel>,
     data: Storage,
     aim_channels: Vec<AimChannel>,
+    video_frame_times_ns: Vec<u64>,
 }
 
 fn c_string(bytes: &[u8]) -> String {
@@ -569,6 +673,7 @@ impl AimFile {
     }
 
     fn parse(display: String, data: Storage) -> Result<Self, AimError> {
+        let video_frame_times_ns = video_frame_times_ns(&data, &display)?;
         let track = aimd_track(&data, &display)?;
         let first = track
             .samples
@@ -689,6 +794,7 @@ impl AimFile {
             channels,
             data,
             aim_channels,
+            video_frame_times_ns,
         })
     }
 }
@@ -791,6 +897,20 @@ impl TelemetrySource for AimFile {
             }
             Representation::GpsFixFlags => gps_u32(&self.data[at..at + 56], 52) as f64,
         }
+    }
+
+    fn video_frame_count(&self) -> Option<u64> {
+        (!self.video_frame_times_ns.is_empty()).then_some(self.video_frame_times_ns.len() as u64)
+    }
+
+    fn video_frame_at(&self, time_ns: u64) -> Option<u64> {
+        if self.video_frame_times_ns.is_empty() {
+            return None;
+        }
+        let index = self
+            .video_frame_times_ns
+            .partition_point(|timestamp| *timestamp <= time_ns);
+        Some(index.saturating_sub(1) as u64)
     }
 }
 
@@ -987,10 +1107,13 @@ mod tests {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/synthetic_aimd.mp4");
         let file = AimFile::open(&path).unwrap();
-        assert_eq!(file.channels.len(), 16);
+        assert_eq!(file.channels.len(), 18);
         let bytes = std::fs::read(&path).unwrap();
         let in_memory = AimFile::from_bytes("synthetic.mp4", bytes).unwrap();
-        assert_eq!(in_memory.channels.len(), 16);
+        assert_eq!(in_memory.channels.len(), 18);
+        let metadata = read_metadata(&path).unwrap();
+        assert_eq!(metadata.driver_ids, [3]);
+        assert_eq!(metadata.video_frame_count, Some(3));
         for name in [
             "GPS Latitude",
             "GPS Longitude",
@@ -1015,5 +1138,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {name}"));
             assert_eq!(channel.sample_count, 1, "{name} sample count");
         }
+        assert_eq!(file.video_frame_count(), Some(3));
+        assert_eq!(file.video_frame_at(0), Some(0));
+        assert_eq!(file.video_frame_at(50_000_000), Some(1));
     }
 }

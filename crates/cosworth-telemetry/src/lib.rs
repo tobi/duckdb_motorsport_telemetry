@@ -13,6 +13,21 @@ use motorsport_telemetry_core::{Channel, Chunk, SampleType, TelemetrySource, Uni
 use units::DefLayout;
 
 pub const TICK_NS: u64 = 100;
+
+#[cfg(not(target_os = "emscripten"))]
+pub fn read_metadata(
+    path: impl AsRef<Path>,
+) -> Result<motorsport_telemetry_core::FileMetadata, CosworthError> {
+    CosworthFile::open(path).map(|file| motorsport_telemetry_core::read_source_metadata(&file))
+}
+
+pub fn read_metadata_from_bytes(
+    path: impl Into<String>,
+    data: Vec<u8>,
+) -> Result<motorsport_telemetry_core::FileMetadata, CosworthError> {
+    CosworthFile::from_bytes(path, data)
+        .map(|file| motorsport_telemetry_core::read_source_metadata(&file))
+}
 const MARKER: u64 = 0x7c72;
 
 #[derive(Debug, Error)]
@@ -598,6 +613,9 @@ mod tests {
             CosworthFile::from_bytes("fixture.pds", std::fs::read(fixture.path()).unwrap())
                 .unwrap();
         assert_eq!(in_memory.channels.len(), 2);
+        let metadata = read_metadata(fixture.path()).unwrap();
+        assert_eq!(metadata.channel_count, 2);
+        assert_eq!(metadata.sample_count, 8);
         assert_eq!(file.channels.len(), 2);
         assert_eq!(file.channels[0].sample_count, 4);
         let values = (0..4)

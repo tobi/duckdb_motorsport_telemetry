@@ -20,6 +20,21 @@ pub use write::{
     MotecWriteError,
 };
 
+#[cfg(not(target_os = "emscripten"))]
+pub fn read_metadata(
+    path: impl AsRef<Path>,
+) -> Result<motorsport_telemetry_core::FileMetadata, MotecError> {
+    MotecFile::open(path).map(|file| motorsport_telemetry_core::read_source_metadata(&file))
+}
+
+pub fn read_metadata_from_bytes(
+    path: impl Into<String>,
+    data: Vec<u8>,
+) -> Result<motorsport_telemetry_core::FileMetadata, MotecError> {
+    MotecFile::from_bytes(path, data)
+        .map(|file| motorsport_telemetry_core::read_source_metadata(&file))
+}
+
 #[derive(Debug, Error)]
 pub enum MotecError {
     #[error("I/O error for {path}: {source}")]
@@ -66,6 +81,9 @@ pub struct MotecFile {
     pub venue: String,
     pub date: String,
     pub time: String,
+    pub event: String,
+    pub session: String,
+    pub comment: String,
     pub channels: Vec<Channel>,
     encodings: Vec<Encoding>,
     data: Storage,
@@ -102,6 +120,36 @@ fn text(data: &[u8], offset: usize, length: usize) -> String {
         .collect::<String>()
         .trim()
         .to_owned()
+}
+
+fn parse_datetime_ns(date: &str, time: &str) -> Option<u64> {
+    let mut date_parts = date.split('/').map(str::parse::<i64>);
+    let day = date_parts.next()?.ok()?;
+    let month = date_parts.next()?.ok()?;
+    let year = date_parts.next()?.ok()?;
+    let mut time_parts = time.split(':').map(str::parse::<i64>);
+    let hour = time_parts.next()?.ok()?;
+    let minute = time_parts.next()?.ok()?;
+    let second = time_parts.next()?.ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+    {
+        return None;
+    }
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days_since_epoch = era * 146_097 + day_of_era - 719_468;
+    let seconds = days_since_epoch
+        .checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)?;
+    u64::try_from(seconds).ok()?.checked_mul(1_000_000_000)
 }
 
 impl MotecFile {
@@ -214,6 +262,16 @@ impl MotecFile {
         if channels.is_empty() {
             return Err(invalid(&display, "no channel metadata found"));
         }
+        let event_ptr = u32le(&data, 0x24).unwrap_or(0) as usize;
+        let (event, session, comment) = if event_ptr > 0 && event_ptr < data.len() {
+            (
+                text(&data, event_ptr, 64),
+                text(&data, event_ptr.saturating_add(64), 64),
+                text(&data, event_ptr.saturating_add(128), 1024),
+            )
+        } else {
+            (String::new(), String::new(), String::new())
+        };
         Ok(Self {
             path: display,
             driver: text(&data, 0x9e, 64),
@@ -221,6 +279,9 @@ impl MotecFile {
             venue: text(&data, 0x15e, 64),
             date: text(&data, 0x5e, 16),
             time: text(&data, 0x7e, 16),
+            event,
+            session,
+            comment,
             channels,
             encodings,
             data,
@@ -237,6 +298,38 @@ impl TelemetrySource for MotecFile {
     }
     fn channels(&self) -> &[Channel] {
         &self.channels
+    }
+    fn absolute_time_range(&self) -> Option<motorsport_telemetry_core::AbsoluteTimeRange> {
+        let start_ns = parse_datetime_ns(&self.date, &self.time)?;
+        let duration_ns = self
+            .channels
+            .iter()
+            .map(|channel| channel.duration_ns)
+            .max()
+            .unwrap_or(0);
+        Some(motorsport_telemetry_core::AbsoluteTimeRange {
+            clock: "utc".into(),
+            start_ns,
+            end_ns: start_ns.saturating_add(duration_ns),
+            session_hint: format!(
+                "motec:{}:{}:{}",
+                self.date.to_ascii_lowercase(),
+                self.vehicle.to_ascii_lowercase(),
+                self.venue.to_ascii_lowercase()
+            ),
+        })
+    }
+
+    fn identity(&self) -> motorsport_telemetry_core::SourceIdentity {
+        motorsport_telemetry_core::SourceIdentity {
+            driver: self.driver.clone(),
+            vehicle: self.vehicle.clone(),
+            venue: self.venue.clone(),
+            event: self.event.clone(),
+            session: self.session.clone(),
+            date: self.date.clone(),
+            time: self.time.clone(),
+        }
     }
 
     fn decode(&self, channel_index: usize, _chunk_index: usize, local_index: u64) -> f64 {
@@ -332,6 +425,9 @@ mod tests {
         let in_memory =
             MotecFile::from_bytes("fixture.ld", std::fs::read(fixture.path()).unwrap()).unwrap();
         assert_eq!(in_memory.channels.len(), 2);
+        let metadata = read_metadata(fixture.path()).unwrap();
+        assert_eq!(metadata.channel_count, 2);
+        assert_eq!(metadata.sample_count, 5);
         assert_eq!(
             (&file.driver, &file.vehicle, &file.venue),
             (&"Tobi".into(), &"Oreca07".into(), &"Mosport".into())

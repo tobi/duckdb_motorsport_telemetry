@@ -340,6 +340,8 @@ fn session_identity_survives_the_round_trip() {
     assert_eq!(written.venue, "Sebring");
     assert_eq!(written.date, "22/04/2026");
     assert_eq!(written.time, "17:20:00");
+    assert_eq!(written.event, "Sebring Test 2026");
+    assert_eq!(written.session, "Qualifying");
     assert_lossless(&source, &written);
 }
 
