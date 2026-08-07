@@ -20,19 +20,19 @@ DuckDB no longer needs `-unsigned`, `httpfs`, or this project's custom repositor
 - `extension-ci-tools` is pinned as a git submodule.
 - The root `Makefile` implements the standard `configure`, `debug`, `release`, `test_debug`, and `test_release` targets.
 - CI builds through the Community Extension toolchain against DuckDB 1.5.4.
-- `test/sql/registration.test` verifies that a signed-style build loads and exposes all six table functions without shipping proprietary telemetry.
+- `test/sql/registration.test` verifies that a signed-style build loads and exposes all eleven table functions without shipping proprietary telemetry.
 - Parser and integration tests use committed deterministic synthetic fixtures; browser smoke tests continue to generate their own temporary fixtures at runtime.
 
 The prepared descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools. The standalone custom repository remains useful for the project's separate DuckDB-Wasm build and historical versions.
 
 ## Prepared descriptor
 
-The v0.7.0 descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
-`0.7.0` at commit `18a5d35b5e03f210f730c048d6f85d8f8d3373c5` (tag `v0.7.0`) and excludes DuckDB-Wasm, musl, MinGW, and
+The v0.7.1 descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
+`0.7.1` at commit `f33af1c293e584a73387244a7bd7336329236d2f` (tag `v0.7.1`) and excludes DuckDB-Wasm, musl, MinGW, and
 RTools; native Linux, macOS, and Windows MSVC are enabled.
 
 The prior upstream pull request, [#2363](https://github.com/duckdb/community-extensions/pull/2363), published version
-`0.6.1`. The v0.7.0 descriptor is ready for a follow-up pull request that adds
+`0.6.1`. The v0.7.1 descriptor is ready for a follow-up pull request that adds
 `extensions/motorsport_telemetry/description.yml` with the new source ref.
 
 Remaining work is to run the upstream matrix, open the follow-up pull request, and answer any review comments or platform
