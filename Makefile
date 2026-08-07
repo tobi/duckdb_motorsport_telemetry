@@ -18,6 +18,8 @@ configure: sync-version venv platform extension_version
 
 sync-version:
 	python3 scripts/sync_version.py
+	mkdir -p configure
+	printf '%s\n' '$(EXTENSION_VERSION)' > configure/extension_version.txt
 
 # The build and test targets stay separate, exactly as the Community Extension
 # workflow invokes them: `configure`/`configure_ci`, then `release`, then
