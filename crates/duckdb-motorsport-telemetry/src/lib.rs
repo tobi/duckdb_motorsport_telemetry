@@ -22,6 +22,7 @@ use motorsport_telemetry_core::{
     group_sessions, read_source_metadata, units, Channel, FileMetadata, SampleType, SourceRef,
     TelemetrySource, UnitSource,
 };
+use racelogic_telemetry::RacelogicFile;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 #[cfg(target_os = "emscripten")]
@@ -32,7 +33,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use vbo_telemetry::VboFile;
 
 pub(crate) const VECTOR_SIZE: u64 = 2048;
 const SAMPLES_COLUMN_COUNT: u64 = 10;
@@ -393,7 +393,7 @@ fn open_paths(
         let source: SourceRef = match format {
             "pds" => Arc::new(CosworthFile::open(&path)?),
             "motec" => Arc::new(MotecFile::open(&path)?),
-            "vbo" => Arc::new(VboFile::open(&path)?),
+            "vbo" => Arc::new(RacelogicFile::open(&path)?),
             "aimd" => Arc::new(AimFile::open(&path)?),
             _ => unreachable!(),
         };
@@ -404,7 +404,7 @@ fn open_paths(
             match format {
                 "pds" => Arc::new(CosworthFile::from_bytes(display, bytes)?) as SourceRef,
                 "motec" => Arc::new(MotecFile::from_bytes(display, bytes)?) as SourceRef,
-                "vbo" => Arc::new(VboFile::from_bytes(display, bytes)?) as SourceRef,
+                "vbo" => Arc::new(RacelogicFile::from_bytes(display, bytes)?) as SourceRef,
                 "aimd" => return Err("AiM MP4 is not supported in the WebAssembly build".into()),
                 _ => unreachable!(),
             }
@@ -875,7 +875,7 @@ fn fast_file_metadata(pattern: &str) -> Result<Vec<FileMetadata>, Box<dyn Error>
             {
                 "pds" => cosworth_telemetry::read_metadata(&path).map_err(Into::into),
                 "ld" => motec_telemetry::read_metadata(&path).map_err(Into::into),
-                "vbo" => vbo_telemetry::read_metadata(&path).map_err(Into::into),
+                "vbo" => racelogic_telemetry::read_metadata(&path).map_err(Into::into),
                 "mp4" => aim_telemetry::read_metadata(&path).map_err(Into::into),
                 extension => Err(format!("unsupported telemetry extension {extension}").into()),
             }

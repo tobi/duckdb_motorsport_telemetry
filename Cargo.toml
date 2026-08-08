@@ -1,11 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/telemetry-core",
-    "crates/cosworth-telemetry",
-    "crates/aim-telemetry",
-    "crates/motec-telemetry",
-    "crates/vbo-telemetry",
     "crates/duckdb-motorsport-telemetry",
 ]
 
@@ -17,12 +12,11 @@ license = "MIT"
 repository = "https://github.com/tobi/duckdb_motorsport_telemetry"
 
 [workspace.dependencies]
-motorsport-telemetry-core = { version = "0.7.1", path = "crates/telemetry-core" }
-cosworth-telemetry = { version = "0.7.1", path = "crates/cosworth-telemetry" }
-aim-telemetry = { version = "0.7.1", path = "crates/aim-telemetry" }
-motec-telemetry = { version = "0.7.1", path = "crates/motec-telemetry" }
-vbo-telemetry = { version = "0.7.1", path = "crates/vbo-telemetry" }
-memmap2 = "0.9"
+motorsport-telemetry-core = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
+cosworth-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
+aim-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
+motec-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
+racelogic-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
 thiserror = "2"
 
 [profile.release]

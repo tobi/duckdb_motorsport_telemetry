@@ -859,9 +859,13 @@ GitHub Actions workflows:
 - `.github/workflows/ci.yml` — formatting, Clippy, native tests, synthetic SQL integration, WASM compilation, browser build, and headless Chromium PDS/MoTeC/VBO smoke tests
 - `.github/workflows/release.yml` — Linux, Windows, macOS, `wasm_eh`, and `wasm_mvp` builds; release ZIPs; browser lab and extension-repository deployment
 
-## Reusable Rust crates
+## Rust telemetry dependencies
 
-This is one Cargo workspace; DuckDB is only the adapter layer.
+The format parsers and shared telemetry model live in
+[`motorsport-telemetry-rs`](https://github.com/tobi/motorsport-telemetry-rs).
+This repository contains only the DuckDB adapter. Both native and WASM manifests
+track the upstream `master` branch, with resolved commits recorded in their
+lockfiles and refreshed automatically by Dependabot.
 
 | Crate | Standalone library API | Native storage |
 |---|---|---|
@@ -869,7 +873,7 @@ This is one Cargo workspace; DuckDB is only the adapter layer.
 | `cosworth-telemetry` | `CosworthFile::open` / `from_bytes` | `open` memory-maps PDS |
 | `aim-telemetry` | `AimFile::open` / `from_bytes` | `open` memory-maps MP4 |
 | `motec-telemetry` | `MotecFile::open` / `from_bytes` | `open` memory-maps LD |
-| `vbo-telemetry` | `VboFile::open` / `from_bytes` / `from_slice` | `open` memory-maps VBO |
+| `racelogic-telemetry` | `RacelogicFile::open` / `from_bytes` / `from_slice` | `open` memory-maps VBO |
 | `duckdb-motorsport-telemetry` | DuckDB table functions | Uses native parser mappings |
 
 Use a parser without DuckDB:
@@ -888,13 +892,8 @@ println!("at 10s={:?}", file.sample_at(speed, 10_000_000_000, true));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Run the standalone inspectors:
-```sh
-cargo run -p aim-telemetry --example inspect -- run.mp4
-cargo run -p cosworth-telemetry --example inspect_cosworth -- run.pds
-cargo run -p motec-telemetry --example inspect_motec -- run.ld
-cargo run -p vbo-telemetry --example inspect_vbo -- run.vbo
-```
+The upstream repository contains standalone examples and parser-specific
+documentation.
 
 ## Performance model
 

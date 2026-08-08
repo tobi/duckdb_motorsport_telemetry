@@ -10,12 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = ROOT / "VERSION"
 WORKSPACE_PACKAGES = {
-    "aim-telemetry",
-    "cosworth-telemetry",
     "duckdb-motorsport-telemetry",
-    "motec-telemetry",
-    "motorsport-telemetry-core",
-    "vbo-telemetry",
 }
 
 
@@ -51,12 +46,6 @@ def expected_files(extension_version: str, cargo_version: str) -> dict[Path, str
     files[ROOT / "Cargo.toml"] = re.sub(
         r'(?m)^(version = ")[^"]+("$)', rf"\g<1>{cargo_version}\g<2>", files[ROOT / "Cargo.toml"], count=1
     )
-    files[ROOT / "Cargo.toml"] = re.sub(
-        r'(?m)^((?:motorsport-telemetry-core|cosworth-telemetry|aim-telemetry|motec-telemetry|vbo-telemetry) = \{ version = ")[^"]+("[,}])',
-        rf"\g<1>{cargo_version}\g<2>",
-        files[ROOT / "Cargo.toml"],
-    )
-
     for path in (ROOT / "Cargo.lock", ROOT / "wasm-extension" / "Cargo.lock"):
         content = files[path]
         for package in WORKSPACE_PACKAGES | {"duckdb-motorsport-telemetry-wasm"}:
