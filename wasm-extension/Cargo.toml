@@ -18,10 +18,10 @@ crate-type = ["staticlib"]
 path = "src/wasm_lib.rs"
 
 [dependencies]
-motorsport-telemetry-core = { path = "../crates/telemetry-core" }
-cosworth-telemetry = { path = "../crates/cosworth-telemetry" }
-motec-telemetry = { path = "../crates/motec-telemetry" }
-vbo-telemetry = { path = "../crates/vbo-telemetry" }
+motorsport-telemetry-core = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
+cosworth-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
+motec-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
+racelogic-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 duckdb = { version = "=1.10504.0", features = [
     "vtab-loadable",

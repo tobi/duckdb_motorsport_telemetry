@@ -263,7 +263,9 @@ instead of fail. Markers (`raw`, `flag`, `Driver`) and counts (`gear`, `laps`)
 deliberately refuse to scale, so "unitless" is not a hole in the type system.
 
 If a real file has a unit the registry does not know, that is a bug: add it to
-`crates/telemetry-core/src/units.rs` and re-run `tests/verify_units.sh`.
+`crates/telemetry-core/src/units.rs` in
+[`motorsport-telemetry-rs`](https://github.com/tobi/motorsport-telemetry-rs),
+update the dependency lockfile, and re-run `tests/verify_units.sh` here.
 
 ## Verifying units against real data
 
