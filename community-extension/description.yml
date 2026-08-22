@@ -39,7 +39,7 @@ docs:
     export step. AiM MP4 support is native-only; the DuckDB-Wasm build does not
     link the AiM parser, so `.mp4` inputs and the `read_aim`/`read_aimd`
     functions are unavailable in the browser. The native reader exposes scalar
-    `CHS` channels and expands each valid 56-byte `GPS0` aggregate into 15 GPS
+    `CHS` channels and expands each valid 56-byte `GPS0` aggregate into 16 GPS
     channels, including WGS84 position, speed, heading, accuracy, timing, and
     status. It provides exact channel metadata, native-rate long-form samples,
     and projected wide readers with time/channel pruning and type-aware
