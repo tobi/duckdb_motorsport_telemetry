@@ -2,7 +2,7 @@
 
 [package]
 name = "duckdb-motorsport-telemetry-wasm"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
@@ -18,10 +18,10 @@ crate-type = ["staticlib"]
 path = "src/wasm_lib.rs"
 
 [dependencies]
-motorsport-telemetry-core = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
-cosworth-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
-motec-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
-racelogic-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
+motorsport-telemetry-core = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.1.0" }
+cosworth-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.1.0" }
+motec-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.1.0" }
+racelogic-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.1.0" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 duckdb = { version = "=1.10504.0", features = [
     "vtab-loadable",

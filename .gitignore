@@ -9,10 +9,13 @@
 /web/dist/
 /web/public/
 
-# Telemetry data is private and often large. The checked-in fixtures are small,
-# deterministic synthetic files; real telemetry logs must never be committed.
+# Real telemetry fixtures live in `motorsport-telemetry-rs`; this adapter keeps
+# no parser corpus of its own.
 *.pds
 *.ld
 *.ldx
 *.vbo
 *.parquet
+
+# Upstream fixture checkout (CI sparse-checkout or a local symlink to motorsport-telemetry-rs/tests/fixtures)
+/tests/fixtures/telemetry-rs

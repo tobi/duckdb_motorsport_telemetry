@@ -5,18 +5,18 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.84"
 license = "MIT"
 repository = "https://github.com/tobi/duckdb_motorsport_telemetry"
 
 [workspace.dependencies]
-motorsport-telemetry-core = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
-cosworth-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
-aim-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
-motec-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
-racelogic-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", branch = "master" }
+motorsport-telemetry-core = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.1.0" }
+cosworth-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.1.0" }
+aim-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.1.0" }
+motec-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.1.0" }
+racelogic-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.1.0" }
 thiserror = "2"
 
 [profile.release]

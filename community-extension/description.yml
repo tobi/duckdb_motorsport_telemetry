@@ -1,7 +1,7 @@
 extension:
   name: motorsport_telemetry
   description: Query AiM MP4, Cosworth PDS, MoTeC LD, and Racelogic VBOX telemetry directly in DuckDB
-  version: 0.7.1
+  version: 0.8.0
   language: Rust
   build: cargo
   license: MIT

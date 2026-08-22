@@ -21,7 +21,7 @@ DuckDB no longer needs `-unsigned`, `httpfs`, or this project's custom repositor
 - The root `Makefile` implements the standard `configure`, `debug`, `release`, `test_debug`, and `test_release` targets.
 - CI builds through the Community Extension toolchain against DuckDB 1.5.4.
 - `test/sql/registration.test` verifies that a signed-style build loads and exposes all eleven table functions without shipping proprietary telemetry.
-- Parser and integration tests use committed deterministic synthetic fixtures; browser smoke tests continue to generate their own temporary fixtures at runtime.
+- Adapter integration tests consume deterministic synthetic fixtures from `motorsport-telemetry-rs`; browser smoke tests generate their own temporary fixtures.
 
 The prepared descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools. The standalone custom repository remains useful for the project's separate DuckDB-Wasm build and historical versions.
 
