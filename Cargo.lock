@@ -47,7 +47,7 @@ name = "aim-telemetry"
 version = "1.1.0"
 source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v1.1.0#1b1e6c562cf1e7aaacd9fbfa575f5bf3a9e4f360"
 dependencies = [
- "motorsport-telemetry-core",
+ "motorsport-telemetry-core 1.1.0",
  "thiserror",
 ]
 
@@ -439,7 +439,7 @@ name = "cosworth-telemetry"
 version = "1.1.0"
 source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v1.1.0#1b1e6c562cf1e7aaacd9fbfa575f5bf3a9e4f360"
 dependencies = [
- "motorsport-telemetry-core",
+ "motorsport-telemetry-core 1.1.0",
  "thiserror",
 ]
 
@@ -621,7 +621,7 @@ dependencies = [
  "glob",
  "libduckdb-sys",
  "motec-telemetry",
- "motorsport-telemetry-core",
+ "motorsport-telemetry-core 1.1.0",
  "racelogic-telemetry",
  "thiserror",
 ]
@@ -1338,10 +1338,15 @@ name = "motec-telemetry"
 version = "1.1.0"
 source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v1.1.0#1b1e6c562cf1e7aaacd9fbfa575f5bf3a9e4f360"
 dependencies = [
- "motorsport-telemetry-core",
+ "motorsport-telemetry-core 1.1.0",
  "quick-xml",
  "thiserror",
 ]
+
+[[package]]
+name = "motorsport-telemetry-core"
+version = "0.1.0"
+source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v0.1.0#4a8c26a0cad455ec71a775d7856ac15b288a67b5"
 
 [[package]]
 name = "motorsport-telemetry-core"
@@ -1651,10 +1656,11 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "racelogic-telemetry"
-version = "1.1.0"
-source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v1.1.0#1b1e6c562cf1e7aaacd9fbfa575f5bf3a9e4f360"
+version = "0.1.0"
+source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v0.1.0#4a8c26a0cad455ec71a775d7856ac15b288a67b5"
 dependencies = [
- "motorsport-telemetry-core",
+ "memmap2",
+ "motorsport-telemetry-core 0.1.0",
  "thiserror",
 ]
 
