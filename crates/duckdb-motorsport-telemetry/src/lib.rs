@@ -361,12 +361,66 @@ fn read_vfs(bind: &BindInfo, path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(data)
 }
 
+/// How much of a file a table function needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenMode {
+    /// Samples will be decoded: open the whole recording.
+    Samples,
+    /// Only channel names/units/rates/counts are read. A `.telemetry` MTJ is
+    /// then served from its header line (`ch` directory) without touching
+    /// the channel data; every other format opens as usual (vendor files are
+    /// memory-mapped and cost nothing until decoded).
+    ChannelDirectory,
+}
+
+/// A source that carries only what a `.telemetry` header states: channel
+/// directory and identity. Decoding a sample from it yields NaN; it is never
+/// handed to a sample-reading table function.
+struct HeaderSource {
+    path: String,
+    format: &'static str,
+    channels: Vec<Channel>,
+}
+
+impl TelemetrySource for HeaderSource {
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn format(&self) -> &'static str {
+        self.format
+    }
+    fn channels(&self) -> &[Channel] {
+        &self.channels
+    }
+    fn decode(&self, _: usize, _: usize, _: u64) -> f64 {
+        f64::NAN
+    }
+}
+
 fn open_paths(
+    bind: &BindInfo,
+    pattern: &str,
+    required_format: Option<&str>,
+    create_date_from: Option<i64>,
+    create_date_to: Option<i64>,
+) -> Result<Vec<InputFile>, Box<dyn Error>> {
+    open_paths_with(
+        bind,
+        pattern,
+        required_format,
+        create_date_from,
+        create_date_to,
+        OpenMode::Samples,
+    )
+}
+
+fn open_paths_with(
     _bind: &BindInfo,
     pattern: &str,
     required_format: Option<&str>,
     create_date_from: Option<i64>,
     create_date_to: Option<i64>,
+    mode: OpenMode,
 ) -> Result<Vec<InputFile>, Box<dyn Error>> {
     let mut result = Vec::new();
     for path in expand_paths(pattern)? {
@@ -400,6 +454,7 @@ fn open_paths(
             "motec" => Arc::new(MotecFile::open(&path)?),
             "vbo" => Arc::new(RacelogicFile::open(&path)?),
             "aimd" => Arc::new(AimFile::open(&path)?),
+            "telemetry" if mode == OpenMode::ChannelDirectory => header_channel_source(&path)?,
             "telemetry" => open_telemetry_source(&path)?,
             _ => unreachable!(),
         };
@@ -718,7 +773,14 @@ impl VTab for ChannelsVTab {
     type InitData = ChannelsInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        let files = open_paths(bind, &bind.get_parameter(0).to_string(), None, None, None)?;
+        let files = open_paths_with(
+            bind,
+            &bind.get_parameter(0).to_string(),
+            None,
+            None,
+            None,
+            OpenMode::ChannelDirectory,
+        )?;
         let map = named_channel_map(bind)?;
         if !map.is_empty() {
             let available: Vec<String> = files
@@ -916,15 +978,35 @@ fn open_telemetry_source(path: &Path) -> Result<SourceRef, Box<dyn Error>> {
     Ok(Arc::from(telemetry_format::open_telemetry(path)?))
 }
 
-/// Summary of a `.telemetry` / MTJ recording with the stint model resolved.
-/// The legacy zip's header-only reader returns unclassified laps, so the
-/// recording is opened (channel payloads stay memory-mapped, not decoded).
+/// Summary of a `.telemetry` / MTJ recording with the stint model resolved,
+/// in O(header): an MTJ document is decoded through its first two lines
+/// only; a legacy zip maps its catalog and probes speed for classification.
 #[cfg(not(target_os = "emscripten"))]
 fn telemetry_recording_metadata(path: &Path) -> Result<FileMetadata, Box<dyn Error>> {
-    if is_jsonl_recording_path(path) {
-        return Ok(telemetry_format::JsonlRecording::open(path)?.metadata());
-    }
-    Ok(telemetry_format::TelemetryRecording::open_unchanged(path)?.metadata())
+    Ok(telemetry_format::read_metadata(path)?)
+}
+
+/// The channel directory of a `.telemetry` / MTJ recording as a source that
+/// carries no samples, read from the header (`ch`) in O(header). Documents
+/// written before the directory existed are parsed in full by the fallback
+/// inside `telemetry_format::read_channels`.
+#[cfg(not(target_os = "emscripten"))]
+fn header_channel_source(path: &Path) -> Result<SourceRef, Box<dyn Error>> {
+    let metadata = telemetry_format::read_metadata(path)?;
+    let channels = telemetry_format::read_channels(path)?;
+    let format = match metadata.format.as_str() {
+        "aimd" => "aimd",
+        "pds" => "pds",
+        "motec" => "motec",
+        "vbo" => "vbo",
+        "telemetry" => "telemetry",
+        _ => "jsonl",
+    };
+    Ok(Arc::new(HeaderSource {
+        path: metadata.path,
+        format,
+        channels,
+    }))
 }
 
 // ── telemetry_file_metadata: one fast summary row per file ─────────
