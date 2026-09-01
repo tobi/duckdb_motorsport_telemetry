@@ -26,3 +26,4 @@ thiserror.workspace = true
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 aim-telemetry.workspace = true
 telemetry-format.workspace = true
+motorsport-telemetry.workspace = true

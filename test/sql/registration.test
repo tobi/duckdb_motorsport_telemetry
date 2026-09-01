@@ -18,7 +18,9 @@ WHERE function_name IN (
   'read_aimd',
   'read_cosworth',
   'read_motec',
-  'read_vbo'
+  'read_vbo',
+  'telemetry_laps',
+  'read_telemetry_normalized'
 );
 ----
-11
+13

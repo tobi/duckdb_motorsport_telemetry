@@ -231,9 +231,49 @@ The lap model, the video-sync calls and the "blessed" normalized channels
 (speed m/s, pedals 0–1, brake pressure bar, steering deg, rpm, lap number /
 stint / label) are specified once, in the
 [motorsport-telemetry-rs client contract](https://github.com/tobi/motorsport-telemetry-rs#the-client-contract-blessed-channels-laps-video-clocks).
-This extension exposes the source-exact channels and the lap model; a
-normalized-channel table function is the planned SQL mirror of
-`NormalizedSample`.
+This extension exposes the source-exact channels (`read_telemetry`), the lap
+model (`telemetry_laps`) and the blessed channels (`read_telemetry_normalized`).
+
+### `read_telemetry_normalized(path, ...)`
+
+The SQL mirror of the library's blessed channels: one row per instant at
+`rate` Hz with fixed units, resolved from each file's channel names, declared
+units and — for unitless dash channels — value ranges, exactly as
+[`NormalizedSample`](https://github.com/tobi/motorsport-telemetry-rs#blessed-channels-normalizedsample)
+does. Works on every supported format and on `.telemetry`; a column is NULL
+where the source has no trustworthy signal for it.
+
+| Column | Unit |
+|---|---|
+| `time_ns` | file-relative ns |
+| `speed_mps` | m/s |
+| `throttle_fraction`, `brake_fraction`, `clutch_fraction` | 0–1 (pedal position) |
+| `brake_pressure_bar` | bar (line pressure, when logged) |
+| `steering_deg` | degrees, sign as logged |
+| `gear` | as logged |
+| `rpm` | rpm |
+| `lap_number` | virtual session lap (1-based, monotonic across stints) |
+| `stint`, `stint_lap_number`, `lap_kind`, `lap_label` | the lap model of `telemetry_laps` at this instant |
+| `lap_progress` | 0–1 within the lap |
+| `lap_time_s` | s since the lap started |
+| `latitude_deg`, `longitude_deg` | WGS84 degrees |
+| `time_of_day_ns`, `absolute_time_ns` | source clock |
+
+Named arguments: `rate` (1–5000, default 100), `start_ns`, `end_ns`,
+`filename`, `create_date_from`, `create_date_to`. Not available in the Wasm
+build.
+
+```sql
+SELECT lap_label,
+       round(max(speed_mps) * 3.6, 1)          AS vmax_kmh,
+       round(avg(throttle_fraction) * 100, 1)  AS throttle_pct,
+       round(max(brake_pressure_bar), 1)       AS brake_bar,
+       max(rpm)                                AS rpm_max
+FROM read_telemetry_normalized('run.pds', rate := 20)
+WHERE lap_kind = 'flying'
+GROUP BY lap_label, lap_number
+ORDER BY lap_number;
+```
 
 ### `telemetry_laps(path)`
 

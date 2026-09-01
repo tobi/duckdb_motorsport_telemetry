@@ -1306,6 +1306,310 @@ impl VTab for LapsVTab {
     }
 }
 
+// ── read_telemetry_normalized: the blessed channels, one row per instant ──
+
+/// Column order of `read_telemetry_normalized` after `time_ns` and the
+/// optional `filename`. Mirrors `motorsport_telemetry::NormalizedSample`.
+#[cfg(not(target_os = "emscripten"))]
+const NORMALIZED_COLUMNS: &[(&str, LogicalTypeId)] = &[
+    ("speed_mps", LogicalTypeId::Double),
+    ("throttle_fraction", LogicalTypeId::Double),
+    ("brake_fraction", LogicalTypeId::Double),
+    ("brake_pressure_bar", LogicalTypeId::Double),
+    ("clutch_fraction", LogicalTypeId::Double),
+    ("steering_deg", LogicalTypeId::Double),
+    ("gear", LogicalTypeId::Bigint),
+    ("rpm", LogicalTypeId::Double),
+    ("lap_number", LogicalTypeId::Bigint),
+    ("stint", LogicalTypeId::UInteger),
+    ("stint_lap_number", LogicalTypeId::Bigint),
+    ("lap_kind", LogicalTypeId::Varchar),
+    ("lap_label", LogicalTypeId::Varchar),
+    ("lap_progress", LogicalTypeId::Double),
+    ("lap_time_s", LogicalTypeId::Double),
+    ("latitude_deg", LogicalTypeId::Double),
+    ("longitude_deg", LogicalTypeId::Double),
+    ("time_of_day_ns", LogicalTypeId::UBigint),
+    ("absolute_time_ns", LogicalTypeId::UBigint),
+];
+
+#[cfg(not(target_os = "emscripten"))]
+struct NormalizedBind {
+    files: Vec<InputFile>,
+    ranges: Vec<(u64, u64, u64)>, // start_ns, end_ns, row_count
+    rate: u64,
+    include_filename: bool,
+}
+
+#[cfg(not(target_os = "emscripten"))]
+struct NormalizedInit {
+    next: AtomicUsize,
+    segments: Vec<WideSegment>,
+    projected: Vec<u64>,
+    /// One normalizer per file, built by whichever worker touches the file
+    /// first and shared afterwards, so roles, track match, laps, clock and
+    /// unit inference are resolved once per file rather than once per chunk.
+    normalizers: Vec<std::sync::OnceLock<motorsport_telemetry::TelemetryNormalizer<'static>>>,
+}
+
+#[cfg(not(target_os = "emscripten"))]
+struct NormalizedVTab;
+
+#[cfg(not(target_os = "emscripten"))]
+impl VTab for NormalizedVTab {
+    type BindData = NormalizedBind;
+    type InitData = NormalizedInit;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        let pattern = bind.get_parameter(0).to_string();
+        let create_date_from = named_timestamp(bind, "create_date_from")?;
+        let create_date_to = named_timestamp(bind, "create_date_to")?;
+        let files = open_paths(bind, &pattern, None, create_date_from, create_date_to)?;
+        let rate = named_i64(bind, "rate").unwrap_or(100);
+        if !(1..=5000).contains(&rate) {
+            return Err("rate must be between 1 and 5000 Hz".into());
+        }
+        let rate = rate as u64;
+        let start_ns = named_i64(bind, "start_ns").unwrap_or(0).max(0) as u64;
+        let requested_end = named_i64(bind, "end_ns").unwrap_or(i64::MAX).max(0) as u64;
+        if requested_end < start_ns {
+            return Err("end_ns must be greater than or equal to start_ns".into());
+        }
+        let include_filename = named_bool(bind, "filename").unwrap_or(false)
+            || named_bool(bind, "add_filename_as_column").unwrap_or(false);
+        let ranges = files
+            .iter()
+            .map(|file| {
+                let duration_ns = file
+                    .channels()
+                    .iter()
+                    .map(|channel| channel.duration_ns)
+                    .max()
+                    .unwrap_or(0);
+                let end_ns = requested_end.min(duration_ns);
+                let rows = if end_ns > start_ns {
+                    ((u128::from(end_ns - start_ns) * u128::from(rate)).div_ceil(1_000_000_000))
+                        as u64
+                } else {
+                    0
+                };
+                (start_ns, end_ns, rows)
+            })
+            .collect::<Vec<_>>();
+        bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
+        if include_filename {
+            bind.add_result_column("filename", ty(LogicalTypeId::Varchar));
+        }
+        for (name, logical) in NORMALIZED_COLUMNS {
+            bind.add_result_column(name, ty(*logical));
+        }
+        bind.set_cardinality(ranges.iter().map(|range| range.2).sum(), true);
+        Ok(NormalizedBind {
+            files,
+            ranges,
+            rate,
+            include_filename,
+        })
+    }
+
+    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        let bind = unsafe { &*init.get_bind_data::<NormalizedBind>() };
+        let mut segments = Vec::new();
+        for (file, &(_, _, rows)) in bind.ranges.iter().enumerate() {
+            let mut row = 0;
+            while row < rows {
+                let len = (rows - row).min(VECTOR_SIZE);
+                segments.push(WideSegment {
+                    file,
+                    row_start: row,
+                    len,
+                });
+                row += len;
+            }
+        }
+        init.set_max_threads(worker_count(segments.len()));
+        let fixed = 1 + usize::from(bind.include_filename);
+        Ok(NormalizedInit {
+            next: AtomicUsize::new(0),
+            segments,
+            projected: projected(init, (fixed + NORMALIZED_COLUMNS.len()) as u64),
+            normalizers: (0..bind.files.len())
+                .map(|_| std::sync::OnceLock::new())
+                .collect(),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        use motorsport_telemetry::SourceExt;
+        let state = func.get_init_data();
+        let segment_idx = state.next.fetch_add(1, Ordering::Relaxed);
+        let Some(segment) = state.segments.get(segment_idx) else {
+            output.set_len(0);
+            return Ok(());
+        };
+        let bind = func.get_bind_data();
+        let file = &bind.files[segment.file];
+        let normalizer = state.normalizers[segment.file].get_or_init(|| {
+            // SAFETY: the source lives in an `Arc` inside the bind data, which
+            // DuckDB keeps alive for as long as this init data exists; the
+            // heap allocation behind the `Arc` never moves. The normalizer is
+            // dropped with the init data, so the `'static` it claims is never
+            // observed past the bind data's lifetime.
+            let source: &'static dyn TelemetrySource = unsafe { &*Arc::as_ptr(&file.source) };
+            motorsport_telemetry::TelemetryNormalizer::new(
+                source,
+                source.signal_roles(),
+                source.match_track(),
+            )
+        });
+        let start_ns = bind.ranges[segment.file].0;
+        let n = segment.len as usize;
+        let time_at = |row: usize| -> u64 {
+            let source_row = segment.row_start + row as u64;
+            (u128::from(start_ns)
+                + u128::from(source_row) * 1_000_000_000u128 / u128::from(bind.rate))
+                as u64
+        };
+        let samples: Vec<motorsport_telemetry::NormalizedSample> =
+            (0..n).map(|row| normalizer.sample(time_at(row))).collect();
+        let fixed = 1 + usize::from(bind.include_filename);
+        for (out_col, original) in state.projected.iter().copied().enumerate() {
+            if out_col >= output.num_columns() {
+                break;
+            }
+            let original = original as usize;
+            let mut vector = output.flat_vector(out_col);
+            if original == 0 {
+                let dst = &mut vector.typed_slice::<i64>()[..n];
+                for (row, value) in dst.iter_mut().enumerate() {
+                    *value = time_at(row) as i64;
+                }
+                continue;
+            }
+            if bind.include_filename && original == 1 {
+                for row in 0..n {
+                    vector.insert(row, file.path());
+                }
+                continue;
+            }
+            let column = original - fixed;
+            macro_rules! f64_col {
+                ($field:ident) => {{
+                    for (row, sample) in samples.iter().enumerate() {
+                        match sample.$field {
+                            Some(value) => vector.typed_slice::<f64>()[row] = value,
+                            None => vector.set_null(row),
+                        }
+                    }
+                }};
+            }
+            match NORMALIZED_COLUMNS[column].0 {
+                "speed_mps" => f64_col!(speed_mps),
+                "throttle_fraction" => f64_col!(throttle_fraction),
+                "brake_fraction" => f64_col!(brake_fraction),
+                "brake_pressure_bar" => f64_col!(brake_pressure_bar),
+                "clutch_fraction" => f64_col!(clutch_fraction),
+                "steering_deg" => f64_col!(steering_deg),
+                "rpm" => f64_col!(rpm),
+                "lap_progress" => f64_col!(lap_progress),
+                "lap_time_s" => f64_col!(lap_time_s),
+                "latitude_deg" => f64_col!(latitude_deg),
+                "longitude_deg" => f64_col!(longitude_deg),
+                "gear" => {
+                    for (row, sample) in samples.iter().enumerate() {
+                        match sample.gear {
+                            Some(value) => vector.typed_slice::<i64>()[row] = value,
+                            None => vector.set_null(row),
+                        }
+                    }
+                }
+                "lap_number" => {
+                    for (row, sample) in samples.iter().enumerate() {
+                        match sample.lap_number {
+                            Some(value) => vector.typed_slice::<i64>()[row] = value,
+                            None => vector.set_null(row),
+                        }
+                    }
+                }
+                "stint_lap_number" => {
+                    for (row, sample) in samples.iter().enumerate() {
+                        match sample.stint_lap_number {
+                            Some(value) => vector.typed_slice::<i64>()[row] = value,
+                            None => vector.set_null(row),
+                        }
+                    }
+                }
+                "stint" => {
+                    for (row, sample) in samples.iter().enumerate() {
+                        match sample.stint {
+                            Some(value) => vector.typed_slice::<u32>()[row] = value,
+                            None => vector.set_null(row),
+                        }
+                    }
+                }
+                "lap_kind" => {
+                    for (row, sample) in samples.iter().enumerate() {
+                        match sample.lap_kind {
+                            Some(kind) => vector.insert(row, kind.as_str()),
+                            None => vector.set_null(row),
+                        }
+                    }
+                }
+                "lap_label" => {
+                    for (row, sample) in samples.iter().enumerate() {
+                        match &sample.lap_label {
+                            Some(label) => vector.insert(row, label.as_str()),
+                            None => vector.set_null(row),
+                        }
+                    }
+                }
+                "time_of_day_ns" => {
+                    for (row, sample) in samples.iter().enumerate() {
+                        match sample.time_of_day_ns {
+                            Some(value) => vector.typed_slice::<u64>()[row] = value,
+                            None => vector.set_null(row),
+                        }
+                    }
+                }
+                "absolute_time_ns" => {
+                    for (row, sample) in samples.iter().enumerate() {
+                        match sample.absolute_time_ns {
+                            Some(value) => vector.typed_slice::<u64>()[row] = value,
+                            None => vector.set_null(row),
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        output.set_len(n);
+        Ok(())
+    }
+
+    fn supports_pushdown() -> bool {
+        true
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        Some(vec![ty(LogicalTypeId::Varchar)])
+    }
+
+    fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+        Some(vec![
+            ("rate".into(), ty(LogicalTypeId::Bigint)),
+            ("start_ns".into(), ty(LogicalTypeId::Bigint)),
+            ("end_ns".into(), ty(LogicalTypeId::Bigint)),
+            ("filename".into(), ty(LogicalTypeId::Boolean)),
+            ("add_filename_as_column".into(), ty(LogicalTypeId::Boolean)),
+            ("create_date_from".into(), ty(LogicalTypeId::Timestamp)),
+            ("create_date_to".into(), ty(LogicalTypeId::Timestamp)),
+        ])
+    }
+}
+
 // ── telemetry_session_metadata: grouped multi-file summaries ───────
 
 struct SessionMetadataBind {
@@ -2552,6 +2856,8 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<SessionMetadataVTab>("telemetry_session_metadata")?;
     con.register_table_function::<FileMetadataVTab>("telemetry_file_metadata")?;
     con.register_table_function::<LapsVTab>("telemetry_laps")?;
+    #[cfg(not(target_os = "emscripten"))]
+    con.register_table_function::<NormalizedVTab>("read_telemetry_normalized")?;
     con.register_table_function::<SamplesVTab>("telemetry_samples")?;
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_telemetry",

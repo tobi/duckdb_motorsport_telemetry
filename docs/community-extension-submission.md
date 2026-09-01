@@ -20,7 +20,7 @@ DuckDB no longer needs `-unsigned`, `httpfs`, or this project's custom repositor
 - `extension-ci-tools` is pinned as a git submodule.
 - The root `Makefile` implements the standard `configure`, `debug`, `release`, `test_debug`, and `test_release` targets.
 - CI builds through the Community Extension toolchain against DuckDB 1.5.4.
-- `test/sql/registration.test` verifies that a signed-style build loads and exposes all eleven table functions without shipping proprietary telemetry.
+- `test/sql/registration.test` verifies that a signed-style build loads and exposes all thirteen table functions without shipping proprietary telemetry.
 - Adapter integration tests consume deterministic synthetic fixtures from `motorsport-telemetry-rs`; browser smoke tests generate their own temporary fixtures.
 
 The prepared descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools. The standalone custom repository remains useful for the project's separate DuckDB-Wasm build and historical versions.

@@ -142,6 +142,20 @@ else
   printf 'motorsport-telemetry CLI not found; skipping .telemetry container checks\n' >&2
 fi
 
+# read_telemetry_normalized: the blessed channels with fixed units, plus the
+# lap model, one row per instant. The synthetic PDS has Speed in m/s and
+# pedals in %, five laps (out, 3 flying, in).
+"$DUCKDB" -unsigned -c "LOAD '$EXTENSION';
+SELECT CASE WHEN (SELECT count(*) FROM read_telemetry_normalized('$fixture', rate=1)) = 817 THEN true ELSE error('normalized row count') END;
+SELECT CASE WHEN (SELECT list(DISTINCT lap_kind ORDER BY lap_kind) FROM read_telemetry_normalized('$fixture', rate=1) WHERE lap_kind IS NOT NULL) = ['flying','in','out'] THEN true ELSE error('normalized lap kinds') END;
+SELECT CASE WHEN (SELECT max(lap_number) FROM read_telemetry_normalized('$fixture', rate=1)) = 5 THEN true ELSE error('normalized virtual lap number') END;
+SELECT CASE WHEN (SELECT round(max(speed_mps), 3) FROM read_telemetry_normalized('$fixture', rate=1)) = (SELECT round(max(\"Speed\"), 3) FROM read_telemetry('$fixture', rate=1, channels='Speed')) THEN true ELSE error('normalized speed differs from source m/s') END;
+SELECT CASE WHEN (SELECT max(throttle_fraction) FROM read_telemetry_normalized('$fixture', rate=1)) <= 1.0 THEN true ELSE error('throttle_fraction not 0..1') END;
+SELECT CASE WHEN (SELECT count(*) FROM read_telemetry_normalized('$fixture', rate=1) WHERE lap_progress < 0 OR lap_progress > 1) = 0 THEN true ELSE error('lap_progress out of range') END;
+SELECT CASE WHEN (SELECT filename FROM read_telemetry_normalized('$fixture', rate=1, filename=true) LIMIT 1) = '$fixture' THEN true ELSE error('normalized filename option') END;
+SELECT CASE WHEN (SELECT count(*) FROM read_telemetry_normalized('$fixture', rate=10, start_ns=10000000000, end_ns=20000000000)) = 100 THEN true ELSE error('normalized start/end pruning') END;
+" >/dev/null
+
 stats="$(python3 scripts/telemetry_stats.py "$fixture" --extension "$EXTENSION" --duckdb "$DUCKDB" --rate 2 --channels Speed)"
 grep -q '^Raw mixed-rate sample stats$' <<<"$stats"
 grep -q '^Interpolated wide stats at 2 Hz$' <<<"$stats"
