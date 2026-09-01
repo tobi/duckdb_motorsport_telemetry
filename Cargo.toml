@@ -5,19 +5,19 @@ members = [
 ]
 
 [workspace.package]
-version = "1.3.0"
+version = "1.3.1"
 edition = "2021"
 rust-version = "1.84"
 license = "MIT"
 repository = "https://github.com/tobi/duckdb_motorsport_telemetry"
 
 [workspace.dependencies]
-motorsport-telemetry-core = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.0" }
-cosworth-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.0" }
-aim-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.0" }
-motec-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.0" }
-racelogic-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.0" }
-telemetry-format = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.0" }
+motorsport-telemetry-core = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.1" }
+cosworth-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.1" }
+aim-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.1" }
+motec-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.1" }
+racelogic-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.1" }
+telemetry-format = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.1" }
 thiserror = "2"
 
 [profile.release]
