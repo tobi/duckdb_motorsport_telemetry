@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "DuckDB extension for AiM MP4, PDS, MoTeC LD, and VBOX VBO telemetry"
+description = "DuckDB extension for AiM MP4, PDS, MoTeC LD, VBOX VBO and .telemetry recordings"
 
 [lib]
 name = "motorsport_telemetry"
@@ -25,3 +25,4 @@ thiserror.workspace = true
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 aim-telemetry.workspace = true
+telemetry-format.workspace = true

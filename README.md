@@ -8,6 +8,7 @@ A fast, vectorized DuckDB extension and reusable Rust parser workspace for:
 - Pi Research / Cosworth **PDS** (`.pds`)
 - MoTeC i2 **LD** (`.ld`)
 - Racelogic VBOX **VBO** (`.vbo`)
+- **`.telemetry`** recordings written by [motorsport-telemetry-rs](https://github.com/tobi/motorsport-telemetry-rs) — a zstd-compressed MTJ JSONL document, or the legacy zip container, told apart by content; plus `.telemetry.jsonl[.zstd]`
 
 The exact model is two relations—channel metadata and native-rate samples—plus a friendly interpolated wide reader. Files are memory-mapped where possible, values decode directly into DuckDB vectors, scans are parallel, and projection pushdown avoids decoding channels a query does not use.
 
@@ -19,6 +20,7 @@ Input support is split by runtime:
 | Pi/Cosworth PDS | Yes | Yes |
 | MoTeC LD | Yes | Yes |
 | Racelogic VBO | Yes | Yes |
+| `.telemetry` / MTJ | Yes | No |
 
 The MP4 reader is a native DuckDB feature in v0.7.0. The DuckDB-Wasm build does not link the AiM parser; `.mp4` inputs and the `read_aim`/`read_aimd` functions are unavailable in the browser.
 
@@ -206,21 +208,54 @@ channels needed for the summary:
 - embedded driver/vehicle/venue/event/session/date/time identity when available
 - absolute clock range and an internal session candidate key when available
 - channel/sample counts and a stable schema hash
-- lap count and fastest complete lap
+- lap count, **flying** lap count, stint count, and the fastest flying lap (number, time, label)
 - native MP4 video-frame count
+- `source_format`: the vendor format a `.telemetry` was converted from
 
 ```sql
-SELECT file, format, session_key, driver_ids, driver, vehicle, venue,
-       event, session, date, time, lap_count,
-       fastest_lap_number, fastest_lap_time_ns, video_frame_count
-FROM telemetry_file_metadata('race/**/*.{pds,ld,vbo,mp4}')
+SELECT file, format, source_format, session_key, driver_ids, driver, vehicle,
+       venue, event, session, date, time,
+       lap_count, flying_lap_count, stint_count,
+       fastest_lap_number, fastest_lap_label, fastest_lap_time_ns,
+       video_frame_count
+FROM telemetry_file_metadata('race/**/*.{pds,ld,vbo,mp4,telemetry}')
 ORDER BY absolute_start_ns;
 ```
 
-Fastest-lap selection prefers the format's reported previous-lap time when
-available and validates it against the reference lap. Otherwise it uses
-interior beacon/timer/counter intervals. The first and last fragments are
-never selected, which excludes out laps, in laps, and file-edge chopped laps.
+The fastest lap is the shortest plausible **flying** lap (see
+`telemetry_laps`): an out-lap, an in-lap cut short by a pit-box counter
+reset, or a lap containing a pit stop is never a candidate, however short a
+broken beacon made it.
+
+### `telemetry_laps(path)`
+
+One row per lap with the stint-aware lap model resolved. Vendor lap counters
+are *stint* counters — an AiM dash resets `Lap_Number` to 0 in the pit box,
+a Cosworth logger keeps counting through a stop, a power-cycled logger starts
+again at 1 — so the raw counter cannot identify a lap across a session.
+
+| Column | Meaning |
+|---|---|
+| `lap_number` | Virtual session lap: 1-based, monotonic across the whole recording and every stint |
+| `stint` | 1-based stint index (new stint at a counter reset, a >10 s recording gap, after an in-lap, after a pit lap) |
+| `stint_lap` | The counter as the dash showed it (0 for an AiM out-lap) |
+| `kind` | `flying`, `out`, `in`, `out-in` (stint with no beacon), `pit` (beacon to beacon with ≥15 s standing still inside) |
+| `label` | `S1 out`, `S1 L2`, `S2 L3`, `S1 pit L5` — stint-local numbers match the dash display |
+| `flying`, `complete` | flying = beacon to beacon and moving throughout; complete = both boundaries inside the recording |
+| `start_ns`, `end_ns`, `duration_ns` | File-relative nanoseconds |
+| `first_video_frame` | Presentation-order frame at `start_ns` (AiM MP4 / `.telemetry` with video linkage) |
+
+```sql
+-- Flying laps per stint, with the samples of the fastest one
+WITH laps AS (SELECT * FROM telemetry_laps('run.pds'))
+SELECT stint, count(*) FILTER (flying) AS flying, min(duration_ns) FILTER (flying) / 1e9 AS best_s
+FROM laps GROUP BY stint ORDER BY stint;
+
+SELECT s.*
+FROM read_telemetry('run.pds', rate := 100, channels := 'Speed_Ref,P_F_BRAKE') s
+JOIN (SELECT start_ns, end_ns FROM telemetry_laps('run.pds') WHERE label = 'S2 L3') l
+  ON s.time_ns >= l.start_ns AND s.time_ns < l.end_ns;
+```
 
 ### `telemetry_samples(path, ...)`
 
@@ -674,12 +709,12 @@ FROM telemetry_column_comments('run.pds', 'laps') WHERE unit <> '';
 
 ## Recursive and mixed-format globs
 
-`*`, `?`, character classes, and recursive `**` are supported. The extension also expands the convenient `{pds,ld,vbo}` suffix group:
+`*`, `?`, character classes, and recursive `**` are supported. The extension also expands one `{a,b,c}` alternation of extension tokens, e.g. `{pds,ld,vbo,mp4,telemetry}`:
 
 ```sql
 SELECT filename, max("Speed_Ref")
 FROM read_telemetry(
-    'data/**/*.{pds,ld,vbo}',
+    'data/**/*.{pds,ld,vbo,telemetry}',
     channels := 'Speed_Ref',
     filename := true
 )

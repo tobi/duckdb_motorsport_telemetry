@@ -19,3 +19,4 @@
 
 # Upstream fixture checkout (CI sparse-checkout or a local symlink to motorsport-telemetry-rs/tests/fixtures)
 /tests/fixtures/telemetry-rs
+__pycache__/

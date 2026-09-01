@@ -117,6 +117,31 @@ SELECT * FROM telemetry_samples('$fixture', channel_map='$bad_map');" >/dev/null
   fi
 done
 
+# `.telemetry` (zstd MTJ by default, legacy zip still readable) and the
+# stint-aware lap table. The MTJ is produced by the upstream CLI when
+# available; otherwise the extension's own write path is not involved, so
+# skip quietly.
+if command -v motorsport-telemetry >/dev/null 2>&1; then
+  mtj="$fixture_dir/synthetic.telemetry"
+  legacy="$fixture_dir/legacy.telemetry"
+  motorsport-telemetry convert --no-passes "$fixture" "$mtj" >/dev/null 2>&1
+  motorsport-telemetry convert --no-passes --native-zip "$fixture" "$legacy" >/dev/null 2>&1
+  "$DUCKDB" -unsigned -c "LOAD '$EXTENSION';
+SELECT CASE WHEN (SELECT count(*) FROM telemetry_laps('$fixture')) = 5 THEN true ELSE error('telemetry_laps on pds failed') END;
+SELECT CASE WHEN (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$fixture')) = ['out','flying','flying','flying','in'] THEN true ELSE error('lap kinds wrong') END;
+SELECT CASE WHEN (SELECT list(label ORDER BY lap_number) FROM telemetry_laps('$fixture')) = ['S1 out','S1 L2','S1 L3','S1 L4','S1 in'] THEN true ELSE error('lap labels wrong') END;
+SELECT CASE WHEN (SELECT flying_lap_count FROM telemetry_file_metadata('$fixture')) = 3 THEN true ELSE error('flying_lap_count wrong') END;
+SELECT CASE WHEN (SELECT fastest_lap_label FROM telemetry_file_metadata('$fixture')) = 'S1 L2' THEN true ELSE error('fastest_lap_label wrong') END;
+SELECT CASE WHEN (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$mtj')) = (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$fixture')) THEN true ELSE error('.telemetry (zstd MTJ) laps differ from source') END;
+SELECT CASE WHEN (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$legacy')) = (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$fixture')) THEN true ELSE error('.telemetry (legacy zip) laps differ from source') END;
+SELECT CASE WHEN (SELECT source_format FROM telemetry_file_metadata('$mtj')) = 'pds' THEN true ELSE error('source_format not carried by .telemetry') END;
+SELECT CASE WHEN (SELECT count(*) FROM telemetry_file_metadata('$fixture_dir/*.{pds,telemetry}')) = 3 THEN true ELSE error('brace expansion with telemetry failed') END;
+SELECT CASE WHEN (SELECT round(max(\"Speed\"), 3) FROM read_telemetry('$mtj', rate=1, channels='Speed')) = (SELECT round(max(\"Speed\"), 3) FROM read_telemetry('$fixture', rate=1, channels='Speed')) THEN true ELSE error('.telemetry wide read differs') END;
+" >/dev/null
+else
+  printf 'motorsport-telemetry CLI not found; skipping .telemetry container checks\n' >&2
+fi
+
 stats="$(python3 scripts/telemetry_stats.py "$fixture" --extension "$EXTENSION" --duckdb "$DUCKDB" --rate 2 --channels Speed)"
 grep -q '^Raw mixed-rate sample stats$' <<<"$stats"
 grep -q '^Interpolated wide stats at 2 Hz$' <<<"$stats"

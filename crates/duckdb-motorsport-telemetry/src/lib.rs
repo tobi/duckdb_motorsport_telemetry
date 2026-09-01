@@ -186,17 +186,19 @@ fn parse_channel_filter(value: Option<&str>) -> HashSet<String> {
 }
 
 fn expand_paths(pattern: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
-    let expansion = if let Some(start) = pattern.find("{pds,ld,vbo,mp4}") {
-        Some((
-            start,
-            "{pds,ld,vbo,mp4}".len(),
-            vec!["pds", "ld", "vbo", "mp4"],
-        ))
-    } else if let Some(start) = pattern.find("{pds,ld,vbo}") {
-        Some((start, "{pds,ld,vbo}".len(), vec!["pds", "ld", "vbo"]))
-    } else {
-        None
-    };
+    // One `{a,b,c}` alternation of extension tokens, e.g.
+    // `**/*.{pds,ld,vbo,mp4,telemetry}`; the `glob` crate has no brace support.
+    let expansion = pattern.find('{').and_then(|start| {
+        let end = start + pattern[start..].find('}')?;
+        let body = &pattern[start + 1..end];
+        let tokens: Vec<&str> = body.split(',').map(str::trim).collect();
+        tokens
+            .iter()
+            .all(|token| {
+                !token.is_empty() && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+            })
+            .then(|| (start, end + 1 - start, tokens))
+    });
     let patterns = if let Some((start, width, extensions)) = expansion {
         extensions
             .into_iter()
@@ -237,8 +239,8 @@ fn expand_paths(pattern: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
                     .and_then(|value| value.to_str())
                     .map(str::to_ascii_lowercase)
                     .as_deref(),
-                Some("pds" | "ld" | "vbo" | "mp4")
-            )
+                Some("pds" | "ld" | "vbo" | "mp4" | "telemetry")
+            ) || is_jsonl_recording_path(path)
         });
     }
     paths.sort();
@@ -378,6 +380,9 @@ fn open_paths(
             "ld" => "motec",
             "vbo" => "vbo",
             "mp4" => "aimd",
+            // `.telemetry` (zstd MTJ or legacy zip), `.telemetry.jsonl[.zstd]`
+            "telemetry" => "telemetry",
+            "jsonl" | "zstd" | "zst" | "mtj" if is_jsonl_recording_path(&path) => "telemetry",
             _ => continue,
         };
         if required_format.is_some_and(|required| required != format) {
@@ -395,6 +400,7 @@ fn open_paths(
             "motec" => Arc::new(MotecFile::open(&path)?),
             "vbo" => Arc::new(RacelogicFile::open(&path)?),
             "aimd" => Arc::new(AimFile::open(&path)?),
+            "telemetry" => open_telemetry_source(&path)?,
             _ => unreachable!(),
         };
         #[cfg(target_os = "emscripten")]
@@ -406,6 +412,9 @@ fn open_paths(
                 "motec" => Arc::new(MotecFile::from_bytes(display, bytes)?) as SourceRef,
                 "vbo" => Arc::new(RacelogicFile::from_bytes(display, bytes)?) as SourceRef,
                 "aimd" => return Err("AiM MP4 is not supported in the WebAssembly build".into()),
+                "telemetry" => {
+                    return Err(".telemetry is not supported in the WebAssembly build".into())
+                }
                 _ => unreachable!(),
             }
         };
@@ -877,10 +886,45 @@ fn fast_file_metadata(pattern: &str) -> Result<Vec<FileMetadata>, Box<dyn Error>
                 "ld" => motec_telemetry::read_metadata(&path).map_err(Into::into),
                 "vbo" => racelogic_telemetry::read_metadata(&path).map_err(Into::into),
                 "mp4" => aim_telemetry::read_metadata(&path).map_err(Into::into),
+                "telemetry" => telemetry_recording_metadata(&path),
+                _ if is_jsonl_recording_path(&path) => telemetry_recording_metadata(&path),
                 extension => Err(format!("unsupported telemetry extension {extension}").into()),
             }
         })
         .collect()
+}
+
+/// True for `.telemetry.jsonl`, `.jsonl`, `.mtj` and their `.zstd`/`.zst`
+/// forms (MTJ recordings, not MTX sidecars).
+#[cfg(not(target_os = "emscripten"))]
+fn is_jsonl_recording_path(path: &Path) -> bool {
+    telemetry_format::is_jsonl_path(path) && !telemetry_format::is_jsonl_ext_path(path)
+}
+
+#[cfg(target_os = "emscripten")]
+fn is_jsonl_recording_path(_path: &Path) -> bool {
+    false
+}
+
+/// Opens a `.telemetry` (either container, decided by content) or an MTJ
+/// document as a shared source.
+#[cfg(not(target_os = "emscripten"))]
+fn open_telemetry_source(path: &Path) -> Result<SourceRef, Box<dyn Error>> {
+    if is_jsonl_recording_path(path) {
+        return Ok(Arc::new(telemetry_format::JsonlRecording::open(path)?));
+    }
+    Ok(Arc::from(telemetry_format::open_telemetry(path)?))
+}
+
+/// Summary of a `.telemetry` / MTJ recording with the stint model resolved.
+/// The legacy zip's header-only reader returns unclassified laps, so the
+/// recording is opened (channel payloads stay memory-mapped, not decoded).
+#[cfg(not(target_os = "emscripten"))]
+fn telemetry_recording_metadata(path: &Path) -> Result<FileMetadata, Box<dyn Error>> {
+    if is_jsonl_recording_path(path) {
+        return Ok(telemetry_format::JsonlRecording::open(path)?.metadata());
+    }
+    Ok(telemetry_format::TelemetryRecording::open_unchanged(path)?.metadata())
 }
 
 // ── telemetry_file_metadata: one fast summary row per file ─────────
@@ -932,6 +976,10 @@ impl VTab for FileMetadataVTab {
             ("date", LogicalTypeId::Varchar),
             ("time", LogicalTypeId::Varchar),
             ("absolute_clock", LogicalTypeId::Varchar),
+            ("flying_lap_count", LogicalTypeId::UBigint),
+            ("stint_count", LogicalTypeId::UBigint),
+            ("fastest_lap_label", LogicalTypeId::Varchar),
+            ("source_format", LogicalTypeId::Varchar),
         ] {
             bind.add_result_column(name, ty(logical));
         }
@@ -944,7 +992,7 @@ impl VTab for FileMetadataVTab {
         init.set_max_threads(worker_count(bind.metadata.len()));
         Ok(FileMetadataInit {
             next: AtomicUsize::new(0),
-            projected: projected(init, 23),
+            projected: projected(init, 27),
         })
     }
 
@@ -1020,6 +1068,143 @@ impl VTab for FileMetadataVTab {
                     21 => vector.insert(row, metadata.identity.time.as_str()),
                     22 => match &metadata.absolute_clock {
                         Some(value) => vector.insert(row, value.as_str()),
+                        None => vector.set_null(row),
+                    },
+                    23 => {
+                        vector.typed_slice::<u64>()[row] = metadata
+                            .laps
+                            .iter()
+                            .filter(|lap| lap.kind.is_flying())
+                            .count()
+                            as u64
+                    }
+                    24 => {
+                        vector.typed_slice::<u64>()[row] =
+                            u64::from(metadata.laps.iter().map(|lap| lap.stint).max().unwrap_or(0))
+                    }
+                    25 => match &metadata.fastest_lap {
+                        Some(lap) => vector.insert(row, lap.label().as_str()),
+                        None => vector.set_null(row),
+                    },
+                    26 => vector.insert(row, metadata.source_format.as_str()),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        output.set_len(n);
+        Ok(())
+    }
+
+    fn supports_pushdown() -> bool {
+        true
+    }
+
+    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
+        Some(vec![ty(LogicalTypeId::Varchar)])
+    }
+}
+
+// ── telemetry_laps: one classified lap per row ─────────────────────
+
+struct LapsBind {
+    rows: Vec<(String, String, motorsport_telemetry_core::LapMetadata)>,
+}
+
+struct LapsInit {
+    next: AtomicUsize,
+    projected: Vec<u64>,
+}
+
+struct LapsVTab;
+
+impl VTab for LapsVTab {
+    type BindData = LapsBind;
+    type InitData = LapsInit;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        #[cfg(not(target_os = "emscripten"))]
+        let metadata = fast_file_metadata(&bind.get_parameter(0).to_string())?;
+        #[cfg(target_os = "emscripten")]
+        let metadata = open_paths(bind, &bind.get_parameter(0).to_string(), None, None, None)?
+            .iter()
+            .map(|file| read_source_metadata(file.deref()))
+            .collect::<Vec<_>>();
+        let rows = metadata
+            .into_iter()
+            .flat_map(|file| {
+                let path = file.path.clone();
+                let format = file.format.clone();
+                file.laps
+                    .into_iter()
+                    .map(move |lap| (path.clone(), format.clone(), lap))
+            })
+            .collect::<Vec<_>>();
+        for (name, logical) in [
+            ("file", LogicalTypeId::Varchar),
+            ("format", LogicalTypeId::Varchar),
+            ("lap_number", LogicalTypeId::Bigint),
+            ("stint", LogicalTypeId::UInteger),
+            ("stint_lap", LogicalTypeId::Bigint),
+            ("kind", LogicalTypeId::Varchar),
+            ("label", LogicalTypeId::Varchar),
+            ("flying", LogicalTypeId::Boolean),
+            ("complete", LogicalTypeId::Boolean),
+            ("start_ns", LogicalTypeId::UBigint),
+            ("end_ns", LogicalTypeId::UBigint),
+            ("duration_ns", LogicalTypeId::UBigint),
+            ("first_video_frame", LogicalTypeId::UBigint),
+        ] {
+            bind.add_result_column(name, ty(logical));
+        }
+        bind.set_cardinality(rows.len() as u64, true);
+        Ok(LapsBind { rows })
+    }
+
+    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        let bind = unsafe { &*init.get_bind_data::<LapsBind>() };
+        init.set_max_threads(worker_count(bind.rows.len()));
+        Ok(LapsInit {
+            next: AtomicUsize::new(0),
+            projected: projected(init, 13),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        let state = func.get_init_data();
+        let start = state
+            .next
+            .fetch_add(VECTOR_SIZE as usize, Ordering::Relaxed);
+        let bind = func.get_bind_data();
+        if start >= bind.rows.len() {
+            output.set_len(0);
+            return Ok(());
+        }
+        let end = (start + VECTOR_SIZE as usize).min(bind.rows.len());
+        let n = end - start;
+        for (out_col, original) in state.projected.iter().copied().enumerate() {
+            if out_col >= output.num_columns() {
+                break;
+            }
+            let mut vector = output.flat_vector(out_col);
+            for (row, (path, format, lap)) in bind.rows[start..end].iter().enumerate() {
+                match original {
+                    0 => vector.insert(row, path.as_str()),
+                    1 => vector.insert(row, format.as_str()),
+                    2 => vector.typed_slice::<i64>()[row] = lap.number,
+                    3 => vector.typed_slice::<u32>()[row] = lap.stint,
+                    4 => vector.typed_slice::<i64>()[row] = lap.stint_lap,
+                    5 => vector.insert(row, lap.kind.as_str()),
+                    6 => vector.insert(row, lap.label().as_str()),
+                    7 => vector.typed_slice::<bool>()[row] = lap.kind.is_flying(),
+                    8 => vector.typed_slice::<bool>()[row] = lap.complete,
+                    9 => vector.typed_slice::<u64>()[row] = lap.start_ns,
+                    10 => vector.typed_slice::<u64>()[row] = lap.end_ns,
+                    11 => vector.typed_slice::<u64>()[row] = lap.duration_ns,
+                    12 => match lap.first_video_frame {
+                        Some(frame) => vector.typed_slice::<u64>()[row] = frame,
                         None => vector.set_null(row),
                     },
                     _ => unreachable!(),
@@ -2284,6 +2469,7 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<ChannelsVTab>("telemetry_metadata")?;
     con.register_table_function::<SessionMetadataVTab>("telemetry_session_metadata")?;
     con.register_table_function::<FileMetadataVTab>("telemetry_file_metadata")?;
+    con.register_table_function::<LapsVTab>("telemetry_laps")?;
     con.register_table_function::<SamplesVTab>("telemetry_samples")?;
     con.register_table_function_with_extra_info::<WideVTab, _>(
         "read_telemetry",
