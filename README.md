@@ -227,6 +227,14 @@ The fastest lap is the shortest plausible **flying** lap (see
 reset, or a lap containing a pit stop is never a candidate, however short a
 broken beacon made it.
 
+The lap model, the video-sync calls and the "blessed" normalized channels
+(speed m/s, pedals 0–1, brake pressure bar, steering deg, rpm, lap number /
+stint / label) are specified once, in the
+[motorsport-telemetry-rs client contract](https://github.com/tobi/motorsport-telemetry-rs#the-client-contract-blessed-channels-laps-video-clocks).
+This extension exposes the source-exact channels and the lap model; a
+normalized-channel table function is the planned SQL mirror of
+`NormalizedSample`.
+
 ### `telemetry_laps(path)`
 
 One row per lap with the stint-aware lap model resolved. Vendor lap counters

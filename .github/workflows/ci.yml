@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tobi/motorsport-telemetry-rs
-          ref: v1.3.2
+          ref: v1.3.3
           path: tests/fixtures/telemetry-rs
           sparse-checkout: tests/fixtures
       - uses: dtolnay/rust-toolchain@stable
