@@ -27,12 +27,12 @@ The prepared descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools. The stand
 
 ## Prepared descriptor
 
-The v1.3.3 descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
-`1.3.3` at commit `0f7b0472e6a2356c477228cd4b86f308d85afdd8` (tag `v1.3.3`) and excludes DuckDB-Wasm, musl, MinGW, and
+The v1.3.4 descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
+`1.3.4` at commit `e9d941d7f3a88a7bb279ceada8555c3c90e611d1` (tag `v1.3.4`) and excludes DuckDB-Wasm, musl, MinGW, and
 RTools; native Linux, macOS, and Windows MSVC are enabled.
 
 The prior upstream pull request, [#2363](https://github.com/duckdb/community-extensions/pull/2363), published version
-`0.6.1`. The v1.3.3 descriptor is ready for a follow-up pull request that adds
+`0.6.1`. The v1.3.4 descriptor is ready for a follow-up pull request that adds
 `extensions/motorsport_telemetry/description.yml` with the new source ref.
 
 Remaining work is to run the upstream matrix, open the follow-up pull request, and answer any review comments or platform
