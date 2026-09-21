@@ -28,7 +28,7 @@ The prepared descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools. The stand
 ## Prepared descriptor
 
 The v1.3.5 descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
-`1.3.5` at commit `e9d941d7f3a88a7bb279ceada8555c3c90e611d1` (tag `v1.3.5`) and excludes DuckDB-Wasm, musl, MinGW, and
+`1.3.5` at commit `5edb1744c3eb5fb4aabf586d3cf53ca09046cc8c` (consuming motorsport-telemetry-rs `v1.3.5`) and excludes DuckDB-Wasm, musl, MinGW, and
 RTools; native Linux, macOS, and Windows MSVC are enabled.
 
 The prior upstream pull request, [#2363](https://github.com/duckdb/community-extensions/pull/2363), published version
