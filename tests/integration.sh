@@ -156,6 +156,20 @@ SELECT CASE WHEN (SELECT filename FROM read_telemetry_normalized('$fixture', rat
 SELECT CASE WHEN (SELECT count(*) FROM read_telemetry_normalized('$fixture', rate=10, start_ns=10000000000, end_ns=20000000000)) = 100 THEN true ELSE error('normalized start/end pruning') END;
 " >/dev/null
 
+# Catalog discoverability. Every registered function must appear in
+# duckdb_functions() with the named (:=) arguments it accepts. Descriptions,
+# examples and categories cannot be populated through the DuckDB C API this
+# extension registers with (see README), and positional arguments show as
+# col0, so only the named-argument surface is asserted here.
+"$DUCKDB" -unsigned -c "LOAD '$EXTENSION';
+SELECT CASE WHEN (SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('telemetry_metadata','telemetry_session_metadata','telemetry_file_metadata','telemetry_laps','read_telemetry_normalized','telemetry_samples','read_telemetry','read_aim','read_aimd','read_cosworth','read_motec','read_vbo','read_telemetry_session','write_telemetry','telemetry_column_comments','telemetry_units')) = 16 THEN true ELSE error('table functions missing from duckdb_functions()') END;
+SELECT CASE WHEN (SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('telemetry_convert','telemetry_convert_column','telemetry_can_convert') AND function_type = 'scalar') = 3 THEN true ELSE error('scalar functions missing from duckdb_functions()') END;
+SELECT CASE WHEN (SELECT list_has_all(parameters, ['channels','rate','start_ns','end_ns','interpolate','max_gap_seconds','filename','channel_map','unit_tags','timestamps','add_filename_as_column','create_date_from','create_date_to']) FROM duckdb_functions() WHERE function_name = 'read_telemetry') THEN true ELSE error('read_telemetry named arguments missing') END;
+SELECT CASE WHEN (SELECT list_has_all(parameters, ['rate','start_ns','end_ns','filename','create_date_from','create_date_to','add_filename_as_column']) FROM duckdb_functions() WHERE function_name = 'read_telemetry_normalized') THEN true ELSE error('read_telemetry_normalized named arguments missing') END;
+SELECT CASE WHEN (SELECT list_has_all(parameters, ['channel','start_ns','end_ns','channel_map']) FROM duckdb_functions() WHERE function_name = 'telemetry_samples') THEN true ELSE error('telemetry_samples named arguments missing') END;
+SELECT CASE WHEN (SELECT list_has_all(parameters, ['channels','channel_map']) FROM duckdb_functions() WHERE function_name = 'telemetry_metadata') THEN true ELSE error('telemetry_metadata named arguments missing') END;
+" >/dev/null
+
 stats="$(python3 scripts/telemetry_stats.py "$fixture" --extension "$EXTENSION" --duckdb "$DUCKDB" --rate 2 --channels Speed)"
 grep -q '^Raw mixed-rate sample stats$' <<<"$stats"
 grep -q '^Interpolated wide stats at 2 Hz$' <<<"$stats"
