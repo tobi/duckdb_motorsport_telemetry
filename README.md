@@ -164,6 +164,14 @@ the reader reports the native rate found in each file.
 
 ## Functions
 
+> **Catalog metadata.** The DuckDB C API this extension registers through
+> (`duckdb-rs` over the bundled 1.5.4 C API) exposes no native-function
+> documentation fields, so `description`, `examples` and `categories` in
+> `duckdb_functions()` are empty and positional arguments may show generated
+> names. `add_parameter` supplies only a type; named arguments declared with
+> `:=` are real and do appear. See this README for the authoritative function
+> reference.
+
 ### `telemetry_metadata(path)`
 
 One row per channel definition:
