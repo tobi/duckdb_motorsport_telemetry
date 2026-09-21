@@ -10,6 +10,11 @@ description = "DuckDB extension for AiM MP4, PDS, MoTeC LD, VBOX VBO and .teleme
 [lib]
 name = "motorsport_telemetry"
 crate-type = ["cdylib", "rlib"]
+# The dependency `motorsport-telemetry` defaults to the same lib name
+# (`motorsport_telemetry`). Building doctests links both, so rustdoc gets two
+# `--extern motorsport_telemetry=…` and fails with E0464. Doctests are the only
+# casualty; unit and integration tests still run.
+doctest = false
 
 [dependencies]
 motorsport-telemetry-core.workspace = true
