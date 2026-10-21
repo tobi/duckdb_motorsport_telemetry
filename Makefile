@@ -3,7 +3,8 @@ USE_UNSTABLE_C_API=1
 # C API v2 is experimental and tied to this exact DuckDB release.
 TARGET_DUCKDB_VERSION?=v2.0.0
 DUCKDB_TEST_VERSION?=2.0.0
-PYTHON_BIN?=uv run --no-project --python 3.12 python
+# Prefer uv locally; Community Extension runners provide Python directly.
+PYTHON_BIN?=$(if $(shell command -v uv 2>/dev/null),uv run --no-project --python 3.12 python,python3)
 EXTENSION_VERSION?=$(shell cat VERSION)
 DUCKDB?=duckdb
 
@@ -18,7 +19,7 @@ build: release
 configure: sync-version venv platform extension_version
 
 sync-version:
-	uv run --no-project scripts/sync_version.py
+	$(PYTHON_BIN) scripts/sync_version.py
 	mkdir -p configure
 	printf '%s\n' '$(EXTENSION_VERSION)' > configure/extension_version.txt
 
