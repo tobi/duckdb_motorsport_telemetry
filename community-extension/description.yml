@@ -12,7 +12,7 @@ extension:
 
 repo:
   github: tobi/duckdb_motorsport_telemetry
-  ref: 5edb1744c3eb5fb4aabf586d3cf53ca09046cc8c
+  ref: 1b2d0146f46d32d5c3e94f85032472ab5f4e5463
 
 docs:
   hello_world: |
