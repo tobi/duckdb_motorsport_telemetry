@@ -23,10 +23,16 @@ const executablePath = process.env.CHROME || (process.platform === 'linux' ? '/u
 const browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox'] });
 const page = await browser.newPage(); const errors = [];
 page.on('pageerror', error => errors.push(error.message));
+page.on('console', message => { if (message.type() === 'error') console.error('Browser:', message.text()); });
+page.on('requestfailed', request => console.error('Request failed:', request.url(), request.failure()?.errorText));
 const testUrl = new URL(process.env.TEST_URL || 'http://127.0.0.1:4173/duckdb_motorsport_telemetry/');
 testUrl.searchParams.set('no-demo', '1');
 await page.goto(testUrl.href);
-await page.waitForFunction(() => document.querySelector('#runtimeText')?.textContent?.includes('Extension ready'), null, { timeout: 60_000 });
+await page.waitForFunction(() => {
+  const status = document.querySelector('#runtimeText')?.textContent;
+  if (status?.includes('Runtime failed')) throw new Error(document.querySelector('#toast')?.textContent || status);
+  return status?.includes('Extension ready');
+}, null, { timeout: 60_000 });
 
 const pds = '/tmp/telemetry-browser-smoke.pds'; pdsFixture(pds);
 await page.locator('#fileInput').setInputFiles(pds);
