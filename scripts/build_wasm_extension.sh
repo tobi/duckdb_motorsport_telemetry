@@ -16,8 +16,11 @@ cargo build \
   --manifest-path "$ROOT/wasm-extension/Cargo.toml" \
   --target "$TARGET" --release --example motorsport_telemetry
 
+# DuckDB-Wasm 1.5.4 was built with Emscripten's split-i32 libc interface.
+# Current Emscripten defaults to BigInt/i64 imports, which cannot link to it.
 emcc "$ARCHIVE" \
   -sSIDE_MODULE=2 \
+  -sWASM_BIGINT=0 \
   -sEXPORTED_FUNCTIONS=_motorsport_telemetry_init_c_api \
   -O3 -o "$RAW"
 
