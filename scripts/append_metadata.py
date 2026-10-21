@@ -22,8 +22,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("extension", type=Path)
     parser.add_argument("--platform", required=True)
-    parser.add_argument("--api-version", default="v1.2.0")
-    parser.add_argument("--extension-version", default="v0.1.0")
+    parser.add_argument("--api-version", default="v2.0.0")
+    parser.add_argument("--abi-type", choices=("C_STRUCT", "C_STRUCT_UNSTABLE"), default="C_STRUCT_UNSTABLE")
+    parser.add_argument("--extension-version", default=None)
     args = parser.parse_args()
 
     # Same 534-byte section emitted by DuckDB's scripts/append_metadata.cmake.
@@ -32,8 +33,8 @@ def main() -> None:
         "4",
         args.platform,
         args.api_version,
-        args.extension_version,
-        "C_STRUCT",
+        args.extension_version or (Path(__file__).resolve().parents[1] / "VERSION").read_text(encoding="utf-8").strip(),
+        args.abi_type,
         "",
         "",
         "",

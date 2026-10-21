@@ -9,9 +9,9 @@ from pathlib import Path
 from append_metadata import field
 
 
-def append_footer(path: Path, platform: str, api_version: str, version: str) -> None:
+def append_footer(path: Path, platform: str, api_version: str, version: str, abi_type: str = "C_STRUCT_UNSTABLE") -> None:
     section = b"\0" + bytes((147, 4, 16)) + b"duckdb_signature" + bytes((128, 4))
-    fields = ["4", platform, api_version, version, "C_STRUCT", "", "", ""]
+    fields = ["4", platform, api_version, version, abi_type, "", "", ""]
     section += b"".join(field(value) for value in reversed(fields)) + bytes(256)
     if len(section) != 534:
         raise AssertionError(len(section))
@@ -24,7 +24,8 @@ def main() -> None:
     parser.add_argument("--library", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--platform", required=True)
-    parser.add_argument("--api-version", default="v1.2.0")
+    parser.add_argument("--api-version", default="v2.0.0")
+    parser.add_argument("--abi-type", choices=("C_STRUCT", "C_STRUCT_UNSTABLE"), default="C_STRUCT_UNSTABLE")
     parser.add_argument("--extension-version")
     args = parser.parse_args()
     version = args.extension_version
@@ -34,7 +35,7 @@ def main() -> None:
         ).read_text(encoding="utf-8").strip()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.library, args.output)
-    append_footer(args.output, args.platform, args.api_version, version)
+    append_footer(args.output, args.platform, args.api_version, version, args.abi_type)
     print(args.output)
 
 

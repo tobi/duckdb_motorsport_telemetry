@@ -9,6 +9,8 @@ updates:
       - dependency-name: cosworth-telemetry
       - dependency-name: motec-telemetry
       - dependency-name: motorsport-telemetry-core
+      - dependency-name: telemetry
+      - dependency-name: telemetry-format
       - dependency-name: racelogic-telemetry
     groups:
       motorsport-telemetry-rs:
@@ -17,21 +19,6 @@ updates:
           - cosworth-telemetry
           - motec-telemetry
           - motorsport-telemetry-core
-          - racelogic-telemetry
-
-  - package-ecosystem: cargo
-    directory: /wasm-extension
-    schedule:
-      interval: daily
-    allow:
-      - dependency-name: cosworth-telemetry
-      - dependency-name: motec-telemetry
-      - dependency-name: motorsport-telemetry-core
-      - dependency-name: racelogic-telemetry
-    groups:
-      motorsport-telemetry-rs:
-        patterns:
-          - cosworth-telemetry
-          - motec-telemetry
-          - motorsport-telemetry-core
+          - telemetry
+          - telemetry-format
           - racelogic-telemetry

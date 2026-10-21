@@ -9,17 +9,24 @@ Use the extension's exact metadata/sample relations before choosing a wide resam
 
 ## Load
 
-Published builds are unsigned. Start DuckDB 1.4.3 with `duckdb -unsigned`, then install over HTTPS:
+The native adapter targets exactly DuckDB **2.0.0**, using experimental C API v2.
+Build from source with Rust 1.88+ and uv, then start `duckdb -unsigned`:
 
 ```sql
-INSTALL httpfs;
-LOAD httpfs;
-INSTALL motorsport_telemetry
-FROM 'https://pages.tobi.lutke.com/duckdb_motorsport_telemetry';
-LOAD motorsport_telemetry;
+INSTALL AND LOAD '/absolute/path/motorsport_telemetry.duckdb_extension';
 ```
 
-For a manually downloaded release artifact, use `INSTALL '/absolute/path/motorsport_telemetry.duckdb_extension'` instead.
+After the v2 build has been accepted, signed and published by Community Extensions:
+
+```sql
+INSTALL AND LOAD motorsport_telemetry FROM community;
+```
+
+Subsequent sessions use `LOAD motorsport_telemetry`. The repository descriptor is
+not evidence of publication. DuckDB-Wasm still embeds 1.5.4 and uses the separate,
+frozen v1.3.5 browser adapter; never load the native v2 artifact in the browser.
+The latest native telemetry dependency reads MTJ JSONL (optionally zstd-compressed)
+and no longer accepts legacy ZIP `.telemetry` containers.
 
 ## Workflow
 

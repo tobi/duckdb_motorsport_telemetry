@@ -43,6 +43,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-telemetry"
+version = "1.3.5"
+source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v1.3.5#cac837feb12fe112bd85a159e2d6d49543647313"
+dependencies = [
+ "motorsport-telemetry-core",
+ "thiserror",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -59,6 +68,12 @@ checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 dependencies = [
  "derive_arbitrary",
 ]
+
+[[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
 
 [[package]]
 name = "arrayvec"
@@ -281,6 +296,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake3"
+version = "1.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8ee0c1824c4dea5b5f81736aff91bae041d2c07ee1192bec91054e10e3e601e"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+]
+
+[[package]]
 name = "borsh"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -351,6 +379,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d262e149917187838d5b42777c8253bcb64500067342904e7d429499a6f277e"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -418,6 +448,12 @@ dependencies = [
  "once_cell",
  "tiny-keccak",
 ]
+
+[[package]]
+name = "constant_time_eq"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "core-foundation-sys"
@@ -601,9 +637,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "duckdb-motorsport-telemetry-wasm"
+name = "duckdb-motorsport-telemetry"
 version = "1.3.5"
+source = "git+https://github.com/tobi/duckdb_motorsport_telemetry?rev=4eb038b5d7e7cdadc758cd4d4e7e7fbf890e052a#4eb038b5d7e7cdadc758cd4d4e7e7fbf890e052a"
 dependencies = [
+ "aim-telemetry",
  "chrono",
  "cosworth-telemetry",
  "duckdb",
@@ -611,9 +649,19 @@ dependencies = [
  "glob",
  "libduckdb-sys",
  "motec-telemetry",
+ "motorsport-telemetry",
  "motorsport-telemetry-core",
  "racelogic-telemetry",
+ "telemetry-format",
  "thiserror",
+]
+
+[[package]]
+name = "duckdb-motorsport-telemetry-wasm"
+version = "1.3.5"
+dependencies = [
+ "duckdb-motorsport-telemetry",
+ "libduckdb-sys",
 ]
 
 [[package]]
@@ -659,6 +707,16 @@ name = "find-msvc-tools"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
+
+[[package]]
+name = "flatbuffers"
+version = "25.12.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc_version",
+]
 
 [[package]]
 name = "flate2"
@@ -1150,6 +1208,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1330,6 +1398,23 @@ source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v1.3.5#cac837f
 dependencies = [
  "motorsport-telemetry-core",
  "quick-xml",
+ "thiserror",
+]
+
+[[package]]
+name = "motorsport-telemetry"
+version = "1.3.5"
+source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v1.3.5#cac837feb12fe112bd85a159e2d6d49543647313"
+dependencies = [
+ "aim-telemetry",
+ "cosworth-telemetry",
+ "motec-telemetry",
+ "motorsport-telemetry-core",
+ "motorsport-track-atlas",
+ "racelogic-telemetry",
+ "serde_json",
+ "telemetry-format",
+ "telemetry-passes",
  "thiserror",
 ]
 
@@ -1864,6 +1949,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
+
+[[package]]
 name = "rustix"
 version = "0.38.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1947,6 +2041,12 @@ name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
@@ -2150,6 +2250,28 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "telemetry-format"
+version = "1.3.5"
+source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v1.3.5#cac837feb12fe112bd85a159e2d6d49543647313"
+dependencies = [
+ "blake3",
+ "flatbuffers",
+ "motorsport-telemetry-core",
+ "serde_json",
+ "thiserror",
+ "zstd",
+]
+
+[[package]]
+name = "telemetry-passes"
+version = "1.3.5"
+source = "git+https://github.com/tobi/motorsport-telemetry-rs?tag=v1.3.5#cac837feb12fe112bd85a159e2d6d49543647313"
+dependencies = [
+ "motorsport-telemetry-core",
+ "thiserror",
 ]
 
 [[package]]
@@ -2854,4 +2976,32 @@ dependencies = [
  "crc32fast",
  "log",
  "simd-adler32",
+]
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]

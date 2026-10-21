@@ -1,12 +1,18 @@
-# DuckDB-Wasm adapter
+# DuckDB-Wasm adapter (frozen API v1)
 
-This standalone Cargo project compiles the vectorized DuckDB adapter and the upstream Rust format parser crates into an Emscripten static library. `scripts/build_wasm_extension.sh` links that archive as a DuckDB-Wasm side module and packages `wasm_eh` and `wasm_mvp` variants.
+The latest published DuckDB-Wasm runtime embeds DuckDB 1.5.4. Native C API v2
+artifacts cannot load there. This independent workspace pins the last compatible
+adapter to `4eb038b5d7e7cdadc758cd4d4e7e7fbf890e052a` (v1.3.5) as a Git
+dependency instead of including the native v2 source. Its parser dependencies
+remain at v1.3.5. Native updates cannot silently alter this browser artifact.
 
-The separate manifest is intentional: native DuckDB 1.4.3 and DuckDB-Wasm's DuckDB 1.5.4 C APIs both link `libduckdb`, so Cargo cannot resolve them in one dependency graph. Both manifests resolve the parser crates from [`motorsport-telemetry-rs`](https://github.com/tobi/motorsport-telemetry-rs).
+Activate emsdk, then run `../scripts/build_wasm_extension.sh`. The linker retains
+and exports the dependency's `motorsport_telemetry_init_c_api` entrypoint. The
+packager explicitly uses `C_STRUCT` and `v1.2.0` API metadata, and publishes only
+under the browser runtime's `v1.5.4/wasm_eh` and `v1.5.4/wasm_mvp` paths.
+Its extension version stays v1.3.5 independently of the native `VERSION`.
 
-```sh
-source /path/to/emsdk/emsdk_env.sh
-../scripts/build_wasm_extension.sh
-```
-
-The browser registers dropped files in DuckDB-Wasm's virtual filesystem. At bind time, the extension reads those bytes through DuckDB's C VFS API and passes them to `CosworthFile::from_bytes`, `MotecFile::from_bytes`, or `RacelogicFile::from_bytes`.
+The browser continues to read PDS, LD and VBO files via DuckDB-Wasm's virtual
+filesystem. Migrating it to v2 requires an upstream DuckDB-Wasm 2.0 package and
+then replacing this frozen adapter, updating its export/footer, and rerunning
+both Emscripten builds and the browser smoke tests. CI still tests the v1 lab.

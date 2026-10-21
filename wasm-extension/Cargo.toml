@@ -17,21 +17,11 @@ name = "motorsport_telemetry"
 crate-type = ["staticlib"]
 path = "src/wasm_lib.rs"
 
+# DuckDB-Wasm currently embeds 1.5.4. Keep its last compatible extension
+# frozen; a v2 build must wait for a DuckDB-Wasm 2.0 runtime.
 [dependencies]
-motorsport-telemetry-core = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.5" }
-cosworth-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.5" }
-motec-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.5" }
-racelogic-telemetry = { git = "https://github.com/tobi/motorsport-telemetry-rs", tag = "v1.3.5" }
-chrono = { version = "0.4", default-features = false, features = ["std"] }
-duckdb = { version = "=1.10504.0", features = [
-    "vtab-loadable",
-    "loadable-extension",
-    "vscalar",
-] }
-duckdb-loadable-macros = "=1.10504.0"
-glob = "0.3"
+telemetry-extension-v1 = { package = "duckdb-motorsport-telemetry", git = "https://github.com/tobi/duckdb_motorsport_telemetry", rev = "4eb038b5d7e7cdadc758cd4d4e7e7fbf890e052a" }
 libduckdb-sys = { version = "=1.10504.0", features = ["loadable-extension"] }
-thiserror = "2"
 
 [profile.release]
 opt-level = 3

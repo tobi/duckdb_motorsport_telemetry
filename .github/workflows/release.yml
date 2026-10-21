@@ -24,6 +24,9 @@ jobs:
           - os: ubuntu-latest
             platform: linux_amd64
             library: target/release/libmotorsport_telemetry.so
+          - os: ubuntu-24.04-arm
+            platform: linux_arm64
+            library: target/release/libmotorsport_telemetry.so
           - os: windows-latest
             platform: windows_amd64
             library: target/release/motorsport_telemetry.dll
@@ -36,6 +39,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p duckdb-motorsport-telemetry
+      - uses: astral-sh/setup-uv@v7
       - name: Package DuckDB extension
         shell: bash
         run: |
@@ -43,7 +47,7 @@ jobs:
           if [[ -z "$extension_version" ]]; then
             extension_version="$(tr -d '\r\n' < VERSION)"
           fi
-          python scripts/package_extension.py \
+          uv run --no-project scripts/package_extension.py \
             --library '${{ matrix.library }}' \
             --output 'dist/${{ matrix.platform }}/motorsport_telemetry.duckdb_extension' \
             --platform '${{ matrix.platform }}' \
@@ -134,10 +138,10 @@ jobs:
         run: |
           mkdir -p site
           cp -R web/dist/. site/
-          for platform in linux_amd64 windows_amd64 osx_arm64; do
-            mkdir -p "site/v1.4.3/$platform"
+          for platform in linux_amd64 linux_arm64 windows_amd64 osx_arm64; do
+            mkdir -p "site/v2.0.0/$platform"
             gzip -9 -c "dist/$platform/motorsport_telemetry.duckdb_extension" \
-              > "site/v1.4.3/$platform/motorsport_telemetry.duckdb_extension.gz"
+              > "site/v2.0.0/$platform/motorsport_telemetry.duckdb_extension.gz"
           done
           for platform in wasm_eh wasm_mvp; do
             mkdir -p "site/v1.5.4/$platform"

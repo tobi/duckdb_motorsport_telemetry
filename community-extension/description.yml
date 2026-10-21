@@ -1,7 +1,7 @@
 extension:
   name: motorsport_telemetry
   description: Query AiM MP4, Cosworth PDS, MoTeC LD, Racelogic VBOX and .telemetry recordings directly in DuckDB, with stint-aware laps
-  version: 1.3.5
+  version: 2.0.0
   language: Rust
   build: cargo
   license: MIT
@@ -36,8 +36,7 @@ docs:
   extended_description: |
     `motorsport_telemetry` reads AiM `aimd` telemetry embedded in MP4, Pi
     Research/Cosworth PDS, MoTeC i2 LD, Racelogic VBOX VBO, and
-    motorsport-telemetry-rs `.telemetry` recordings (zstd MTJ JSONL or the
-    legacy zip, detected by content) without an export step.
+    motorsport-telemetry-rs `.telemetry` recordings (zstd-compressed MTJ JSONL) without an export step.
     `telemetry_laps` returns each lap with a session-monotonic virtual lap
     number, stint index, the dash's own stint lap counter, and a normalized
     kind (flying, out, in, out-in, pit); `telemetry_file_metadata` reports

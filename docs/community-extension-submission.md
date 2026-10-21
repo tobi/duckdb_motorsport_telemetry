@@ -1,49 +1,53 @@
-# DuckDB Community Extension submission
+# DuckDB 2.0 Community Extension submission
 
-DuckDB Community Extensions are submitted by pull request to
-[`duckdb/community-extensions`](https://github.com/duckdb/community-extensions). The pull request adds one descriptor at
-`extensions/motorsport_telemetry/description.yml`; DuckDB's infrastructure checks out the pinned source commit, builds it,
-tests it, signs it, and publishes it for each supported DuckDB platform.
+The native adapter now targets exactly **DuckDB 2.0.0** through the experimental
+C API v2 (`duckdb-neo`, upstream Rust commit
+`e1b0940dfddd575c43fe4e2f070d47ee53d419cd`). The core build is
+`d54cbbe3df17e8e5ce68312f483b4155836112aa`. Artifacts carry
+`C_STRUCT_UNSTABLE`, not the API-v1 `C_STRUCT` footer.
 
-Once accepted, installation becomes:
+After the corresponding source revision is reviewed, built, signed and published
+by [DuckDB Community Extensions](https://github.com/duckdb/community-extensions):
 
 ```sql
-INSTALL motorsport_telemetry FROM community;
-LOAD motorsport_telemetry;
+INSTALL AND LOAD motorsport_telemetry FROM community;
 ```
 
-DuckDB no longer needs `-unsigned`, `httpfs`, or this project's custom repository for Community Extension builds.
+The descriptor in [description.yml](../community-extension/description.yml) is
+submission metadata, not evidence that a 2.0 artifact is already published.
+For local validation, use an unsigned DuckDB 2.0.0 session and
+`INSTALL AND LOAD '/absolute/path/motorsport_telemetry.duckdb_extension'`.
 
-## Repository preparation completed
+## Build and validation contract
 
-- The repository uses DuckDB's stable public C extension API.
-- `extension-ci-tools` is pinned as a git submodule.
-- The root `Makefile` implements the standard `configure`, `debug`, `release`, `test_debug`, and `test_release` targets.
-- CI builds through the Community Extension toolchain against DuckDB 1.5.4.
-- `test/sql/registration.test` verifies that a signed-style build loads and exposes all thirteen table functions without shipping proprietary telemetry.
-- Adapter integration tests consume deterministic synthetic fixtures from `motorsport-telemetry-rs`; browser smoke tests generate their own temporary fixtures.
+- Rust 1.88+ and uv; pinned `extension-ci-tools` submodule.
+- Standard `configure`, `release`, `test_release` targets; `TARGET_DUCKDB_VERSION=v2.0.0`.
+- Pin the sqllogictest runner to DuckDB 2.0.0 and force `SKIP_TESTS=0` in CI.
+- `test/sql/registration.test` checks registration without proprietary recordings.
+- `tests/api_v2.sh` checks combined installation, documentation, NULLs, multi-chunk vectors and conversion errors.
+- `tests/integration.sh` checks parser reads, projections, interpolation, units,
+  sessions, normalization, MoTeC exports and compressed MTJ round trips. It uses
+  synthetic fixtures and the writer from the same pinned telemetry commit.
+- Native telemetry parsers use `7cb37dc61eeb343d99eeeb27a786970ff2ec26bc`.
+  The current library reads JSONL/zstd `.telemetry`; legacy ZIP was removed upstream.
 
-The prepared descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools. The standalone custom repository remains useful for the project's separate DuckDB-Wasm build and historical versions.
+The descriptor excludes Wasm, musl, MinGW and RTools. Native release CI includes
+Linux amd64/arm64, macOS arm64 and Windows amd64. Local validation on one platform
+does not replace that upstream matrix.
 
-## Prepared descriptor
+## Browser compatibility
 
-The v1.3.5 descriptor is [`community-extension/description.yml`](../community-extension/description.yml). It pins version
-`1.3.5` at commit `5edb1744c3eb5fb4aabf586d3cf53ca09046cc8c` (consuming motorsport-telemetry-rs `v1.3.5`) and excludes DuckDB-Wasm, musl, MinGW, and
-RTools; native Linux, macOS, and Windows MSVC are enabled.
+The latest DuckDB-Wasm package still embeds 1.5.4. Its independent workspace keeps
+the last compatible extension v1.3.5 at
+`4eb038b5d7e7cdadc758cd4d4e7e7fbf890e052a`. Its `C_STRUCT` artifacts remain
+under `v1.5.4/wasm_eh` and `v1.5.4/wasm_mvp`; native v2 artifacts are under
+`v2.0.0/<platform>/`. Do not publish a native v2 binary into a Wasm v1 path.
 
-The prior upstream pull request, [#2363](https://github.com/duckdb/community-extensions/pull/2363), published version
-`0.6.1`. The v1.3.5 descriptor is ready for a follow-up pull request that adds
-`extensions/motorsport_telemetry/description.yml` with the new source ref.
+## Publication
 
-Remaining work is to run the upstream matrix, open the follow-up pull request, and answer any review comments or platform
-build failures it reports.
-
-To submit a later revision:
-
-1. Set `repo.ref` to the exact reviewed commit on `tobi/duckdb_motorsport_telemetry` and bump the descriptor version.
-2. Run the repository CI and verify the Community Extension build job.
-3. Copy the descriptor into the `duckdb/community-extensions` fork and open a pull request.
-
-## Maintenance model
-
-Community Extensions pin `repo.ref` to one source commit. Shipping an update requires a small upstream pull request that changes the descriptor version and ref. DuckDB rebuilds all descriptors for each new DuckDB release. The extension's own latest-DuckDB CI should remain green so incompatibilities are found before a DuckDB release freeze.
+Pin `repo.ref` to the reviewed source commit, push it, run the platform matrix,
+then copy the descriptor into `extensions/motorsport_telemetry/description.yml`
+in a Community Extensions pull request. Acceptance and signing are external
+steps; the local migration does not modify the published community artifact.
+The historical [PR #2363](https://github.com/duckdb/community-extensions/pull/2363)
+first published v0.6.1 and is not the v2 submission.

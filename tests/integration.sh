@@ -117,15 +117,10 @@ SELECT * FROM telemetry_samples('$fixture', channel_map='$bad_map');" >/dev/null
   fi
 done
 
-# `.telemetry` (zstd MTJ by default, legacy zip still readable) and the
-# stint-aware lap table. The MTJ is produced by the upstream CLI when
-# available; otherwise the extension's own write path is not involved, so
-# skip quietly.
-if command -v motorsport-telemetry >/dev/null 2>&1; then
-  mtj="$fixture_dir/synthetic.telemetry"
-  legacy="$fixture_dir/legacy.telemetry"
-  motorsport-telemetry convert --no-passes "$fixture" "$mtj" >/dev/null 2>&1
-  motorsport-telemetry convert --no-passes --native-zip "$fixture" "$legacy" >/dev/null 2>&1
+# Generate current compressed MTJ using the exact Rust dependency being tested.
+# Always run this coverage; an unrelated or missing global CLI cannot skip it.
+mtj="$fixture_dir/synthetic.telemetry"
+cargo run --locked --quiet -p duckdb-motorsport-telemetry --example generate_recording -- "$fixture" "$mtj"
   "$DUCKDB" -unsigned -c "LOAD '$EXTENSION';
 SELECT CASE WHEN (SELECT count(*) FROM telemetry_laps('$fixture')) = 5 THEN true ELSE error('telemetry_laps on pds failed') END;
 SELECT CASE WHEN (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$fixture')) = ['out','flying','flying','flying','in'] THEN true ELSE error('lap kinds wrong') END;
@@ -133,14 +128,10 @@ SELECT CASE WHEN (SELECT list(label ORDER BY lap_number) FROM telemetry_laps('$f
 SELECT CASE WHEN (SELECT flying_lap_count FROM telemetry_file_metadata('$fixture')) = 3 THEN true ELSE error('flying_lap_count wrong') END;
 SELECT CASE WHEN (SELECT fastest_lap_label FROM telemetry_file_metadata('$fixture')) = 'S1 L2' THEN true ELSE error('fastest_lap_label wrong') END;
 SELECT CASE WHEN (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$mtj')) = (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$fixture')) THEN true ELSE error('.telemetry (zstd MTJ) laps differ from source') END;
-SELECT CASE WHEN (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$legacy')) = (SELECT list(kind ORDER BY lap_number) FROM telemetry_laps('$fixture')) THEN true ELSE error('.telemetry (legacy zip) laps differ from source') END;
 SELECT CASE WHEN (SELECT source_format FROM telemetry_file_metadata('$mtj')) = 'pds' THEN true ELSE error('source_format not carried by .telemetry') END;
-SELECT CASE WHEN (SELECT count(*) FROM telemetry_file_metadata('$fixture_dir/*.{pds,telemetry}')) = 3 THEN true ELSE error('brace expansion with telemetry failed') END;
+SELECT CASE WHEN (SELECT count(*) FROM telemetry_file_metadata('$fixture_dir/*.{pds,telemetry}')) = 2 THEN true ELSE error('brace expansion with telemetry failed') END;
 SELECT CASE WHEN (SELECT round(max(\"Speed\"), 3) FROM read_telemetry('$mtj', rate=1, channels='Speed')) = (SELECT round(max(\"Speed\"), 3) FROM read_telemetry('$fixture', rate=1, channels='Speed')) THEN true ELSE error('.telemetry wide read differs') END;
 " >/dev/null
-else
-  printf 'motorsport-telemetry CLI not found; skipping .telemetry container checks\n' >&2
-fi
 
 # read_telemetry_normalized: the blessed channels with fixed units, plus the
 # lap model, one row per instant. The synthetic PDS has Speed in m/s and
@@ -156,11 +147,8 @@ SELECT CASE WHEN (SELECT filename FROM read_telemetry_normalized('$fixture', rat
 SELECT CASE WHEN (SELECT count(*) FROM read_telemetry_normalized('$fixture', rate=10, start_ns=10000000000, end_ns=20000000000)) = 100 THEN true ELSE error('normalized start/end pruning') END;
 " >/dev/null
 
-# Catalog discoverability. Every registered function must appear in
-# duckdb_functions() with the named (:=) arguments it accepts. Descriptions,
-# examples and categories cannot be populated through the DuckDB C API this
-# extension registers with (see README), and positional arguments show as
-# col0, so only the named-argument surface is asserted here.
+# Catalog discoverability: v2 adds real positional names, descriptions,
+# examples and categories. Full documentation checks live in api_v2.sh.
 "$DUCKDB" -unsigned -c "LOAD '$EXTENSION';
 SELECT CASE WHEN (SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('telemetry_metadata','telemetry_session_metadata','telemetry_file_metadata','telemetry_laps','read_telemetry_normalized','telemetry_samples','read_telemetry','read_aim','read_aimd','read_cosworth','read_motec','read_vbo','read_telemetry_session','write_telemetry','telemetry_column_comments','telemetry_units')) = 16 THEN true ELSE error('table functions missing from duckdb_functions()') END;
 SELECT CASE WHEN (SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('telemetry_convert','telemetry_convert_column','telemetry_can_convert') AND function_type = 'scalar') = 3 THEN true ELSE error('scalar functions missing from duckdb_functions()') END;

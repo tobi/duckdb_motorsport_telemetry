@@ -10,11 +10,6 @@ description = "DuckDB extension for AiM MP4, PDS, MoTeC LD, VBOX VBO and .teleme
 [lib]
 name = "motorsport_telemetry"
 crate-type = ["cdylib", "rlib"]
-# The dependency `motorsport-telemetry` defaults to the same lib name
-# (`motorsport_telemetry`). Building doctests links both, so rustdoc gets two
-# `--extern motorsport_telemetry=…` and fails with E0464. Doctests are the only
-# casualty; unit and integration tests still run.
-doctest = false
 
 [dependencies]
 motorsport-telemetry-core.workspace = true
@@ -22,13 +17,12 @@ cosworth-telemetry.workspace = true
 motec-telemetry.workspace = true
 racelogic-telemetry.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-duckdb = { version = "=1.10504.0", features = ["vtab-loadable", "loadable-extension", "vscalar"] }
-duckdb-loadable-macros = "=1.10504.0"
+duckdb-neo = { git = "https://github.com/duckdb/duckdb-rs", rev = "e1b0940dfddd575c43fe4e2f070d47ee53d419cd", default-features = false, features = ["build-extension"] }
+duckdb-loadable-macros = { git = "https://github.com/duckdb/duckdb-rs", rev = "e1b0940dfddd575c43fe4e2f070d47ee53d419cd", features = ["neo"] }
 glob = "0.3"
-libduckdb-sys = { version = "=1.10504.0", features = ["loadable-extension"] }
 thiserror.workspace = true
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 aim-telemetry.workspace = true
 telemetry-format.workspace = true
-motorsport-telemetry.workspace = true
+telemetry.workspace = true

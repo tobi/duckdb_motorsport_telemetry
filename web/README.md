@@ -2,6 +2,10 @@
 
 Local-first browser UI for `duckdb_motorsport_telemetry`.
 
+This lab stays on DuckDB-Wasm 1.5.4 with the frozen API-v1 extension v1.3.5.
+The native adapter uses DuckDB 2.0.0 and C API v2; those artifacts are incompatible
+with this runtime. See [the browser adapter](../wasm-extension/README.md).
+
 ```sh
 bun install
 bun run dev

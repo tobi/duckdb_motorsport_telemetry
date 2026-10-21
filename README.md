@@ -8,7 +8,7 @@ A fast, vectorized DuckDB extension and reusable Rust parser workspace for:
 - Pi Research / Cosworth **PDS** (`.pds`)
 - MoTeC i2 **LD** (`.ld`)
 - Racelogic VBOX **VBO** (`.vbo`)
-- **`.telemetry`** recordings written by [motorsport-telemetry-rs](https://github.com/tobi/motorsport-telemetry-rs) — a zstd-compressed MTJ JSONL document, or the legacy zip container, told apart by content; plus `.telemetry.jsonl[.zstd]`
+- **`.telemetry`** recordings written by [motorsport-telemetry-rs](https://github.com/tobi/motorsport-telemetry-rs) — a zstd-compressed MTJ JSONL document; plus `.telemetry.jsonl[.zstd]`
 
 The exact model is two relations—channel metadata and native-rate samples—plus a friendly interpolated wide reader. Files are memory-mapped where possible, values decode directly into DuckDB vectors, scans are parallel, and projection pushdown avoids decoding channels a query does not use.
 
@@ -24,37 +24,47 @@ Input support is split by runtime:
 
 The MP4 reader is a native DuckDB feature in v0.7.0. The DuckDB-Wasm build does not link the AiM parser; `.mp4` inputs and the `read_aim`/`read_aimd` functions are unavailable in the browser.
 
-## Easiest installation
+## DuckDB 2.0 installation
 
-Install the signed DuckDB Community Extension:
+The native adapter targets **DuckDB 2.0.0** through the experimental **C API v2**.
+Use exactly that core version: v2 loadable extensions are not yet ABI-stable.
+This migration follows the [DuckDB 2.0 announcement](https://duckdb.org/2026/10/21/announcing-duckdb-200.html#write-extensions-once-and-host-them-yourself)
+and [upstream Rust extension guide](https://github.com/duckdb/duckdb-rs/blob/e1b0940dfddd575c43fe4e2f070d47ee53d419cd/crates/duckdb-neo/extensions.md).
 
-```sql
-INSTALL motorsport_telemetry FROM community;
-LOAD motorsport_telemetry;
-```
-
-Verify it against a telemetry file:
+Build the native artifact below, then start DuckDB 2.0.0 with `duckdb -unsigned`:
 
 ```sql
+INSTALL AND LOAD '/absolute/path/motorsport_telemetry.duckdb_extension';
 SELECT name, unit, frequency_hz, sample_count
-FROM telemetry_metadata('/path/to/run.pds');
+FROM telemetry_metadata('run.pds');
 ```
 
-DuckDB downloads the platform-specific build from the Community Extension endpoint and verifies its signature. `httpfs` and `-unsigned` are not required. Subsequent sessions only need:
+Once the 2.0 adapter has been built, signed and published by Community Extensions,
+the new combined installation syntax is:
 
 ```sql
-LOAD motorsport_telemetry;
+INSTALL AND LOAD motorsport_telemetry FROM community;
 ```
 
-If DuckDB still finds an older cached `0.6.0` artifact, refresh it with:
+The checked-in descriptor is submission metadata; changing this repository does
+not publish or upgrade the community artifact. Historical community builds target
+older DuckDB versions. A later session can use `LOAD motorsport_telemetry` after
+installation. `FORCE INSTALL AND LOAD motorsport_telemetry FROM community` refreshes
+an already published compatible build.
 
-```sql
-FORCE INSTALL motorsport_telemetry FROM community;
-```
-
-The checked-in release version is maintained in [`VERSION`](VERSION), and all package, artifact, and release metadata is synchronized from that file.
+Native release artifacts use `C_STRUCT_UNSTABLE` metadata and the repository path
+`v2.0.0/<platform>/`. The separate browser artifacts retain their API-v1 footer and
+`v1.5.4/wasm_eh` / `v1.5.4/wasm_mvp` paths. Native package versions are synchronized
+from [`VERSION`](VERSION); the frozen browser adapter stays at v1.3.5.
 
 ## Browser telemetry lab
+
+**Compatibility:** the current `@duckdb/duckdb-wasm` package embeds DuckDB 1.5.4.
+The lab therefore keeps the last compatible API-v1 adapter (v1.3.5, pinned to
+`4eb038b5d7e7cdadc758cd4d4e7e7fbf890e052a`). It does not load the native v2
+artifact or claim the new native parser revision. A browser migration needs an
+upstream DuckDB-Wasm 2.0 runtime first; its build and smoke test stay in CI.
+
 
 Open **[Telemetry Lab](https://pages.tobi.lutke.com/duckdb_motorsport_telemetry/)** to analyze a PDS, LD, or VBO recording without installing anything. Drop a `.pds`, `.ld`, or `.vbo` file into the page; the file stays in your browser and is never uploaded. The DuckDB-Wasm build does not link the AiM parser, so AiM `.mp4` inputs and the `read_aim`/`read_aimd` functions are unavailable there.
 
@@ -164,13 +174,10 @@ the reader reports the native rate found in each file.
 
 ## Functions
 
-> **Catalog metadata.** The DuckDB C API this extension registers through
-> (`duckdb-rs` over the bundled 1.5.4 C API) exposes no native-function
-> documentation fields, so `description`, `examples` and `categories` in
-> `duckdb_functions()` are empty and positional arguments may show generated
-> names. `add_parameter` supplies only a type; named arguments declared with
-> `:=` are real and do appear. See this README for the authoritative function
-> reference.
+> **Native catalog metadata.** C API v2 registers real positional argument
+> names, named arguments, descriptions, examples and the `telemetry` category.
+> Inspect them with `SELECT * FROM duckdb_functions() WHERE function_name =
+> 'read_telemetry'`. The frozen browser adapter retains the older catalog limits.
 
 ### `telemetry_metadata(path)`
 
@@ -865,8 +872,7 @@ duckdb -unsigned
 ```
 
 ```sql
-INSTALL '/absolute/path/motorsport_telemetry.duckdb_extension';
-LOAD motorsport_telemetry;
+INSTALL AND LOAD '/absolute/path/motorsport_telemetry.duckdb_extension';
 ```
 
 ### Windows x86-64
@@ -880,8 +886,7 @@ Expand-Archive motorsport_telemetry-windows_amd64.zip
 ```
 
 ```sql
-INSTALL 'C:/absolute/path/motorsport_telemetry.duckdb_extension';
-LOAD motorsport_telemetry;
+INSTALL AND LOAD 'C:/absolute/path/motorsport_telemetry.duckdb_extension';
 ```
 
 ### macOS Apple Silicon
@@ -894,16 +899,19 @@ GitHub release artifacts are unsigned, so every process loading one must allow u
 import duckdb
 
 con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-con.execute("INSTALL '/path/motorsport_telemetry.duckdb_extension'")
-con.execute("LOAD motorsport_telemetry")
+con.execute("INSTALL AND LOAD '/path/motorsport_telemetry.duckdb_extension'")
 print(con.sql("SELECT * FROM telemetry_metadata('run.vbo')"))
 ```
 
-The signed Community Extension was first published via [upstream PR #2363](https://github.com/duckdb/community-extensions/pull/2363). The v0.7.0 descriptor is prepared in [`community-extension/description.yml`](community-extension/description.yml) for a follow-up PR; the release path remains useful for offline installs and historical versions, while this descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools and the standalone repository remains the path for the separate DuckDB-Wasm build.
+The signed Community Extension was first published via [upstream PR #2363](https://github.com/duckdb/community-extensions/pull/2363). The v2.0.0 descriptor is prepared in [`community-extension/description.yml`](community-extension/description.yml) for a follow-up PR; the release path remains useful for offline installs and historical versions, while this descriptor excludes DuckDB-Wasm, musl, MinGW, and RTools and the standalone repository remains the path for the separate DuckDB-Wasm build.
 
 ## Build from source
 
-Requirements for native builds: Rust 1.85+, Python 3, DuckDB CLI 1.4.x.
+Requirements for native builds: Rust 1.88+, uv, and DuckDB CLI **2.0.0**.
+The C API v2 Rust crates are pinned to upstream commit
+`e1b0940dfddd575c43fe4e2f070d47ee53d419cd` (1.20000.0) because they are not
+yet published on crates.io. The DuckDB core pin is
+`d54cbbe3df17e8e5ce68312f483b4155836112aa`.
 
 ```sh
 git clone --recursive https://github.com/tobi/duckdb_motorsport_telemetry.git
@@ -922,7 +930,7 @@ Manual package command:
 
 ```sh
 cargo build --release -p duckdb-motorsport-telemetry
-python scripts/package_extension.py \
+uv run --no-project scripts/package_extension.py \
   --library target/release/libmotorsport_telemetry.so \
   --output build/release/motorsport_telemetry.duckdb_extension \
   --platform linux_amd64
@@ -954,9 +962,14 @@ GitHub Actions workflows:
 
 The format parsers and shared telemetry model live in
 [`motorsport-telemetry-rs`](https://github.com/tobi/motorsport-telemetry-rs).
-This repository contains only the DuckDB adapter. Both native and WASM manifests
-track the upstream `master` branch, with resolved commits recorded in their
-lockfiles and refreshed automatically by Dependabot.
+This repository contains only the DuckDB adapter. The native workspace pins
+upstream `master` at **`7cb37dc61eeb343d99eeeb27a786970ff2ec26bc`** (2026-10-21),
+including the current JSONL recording API, two-argument normalizer, VBOX gap
+handling, metadata and lap recovery updates, and bounded MP4/video inspection.
+The native `.telemetry` reader uses `JsonlRecording`: the upstream library has
+removed legacy ZIP support. Convert historical ZIP recordings using an older
+telemetry CLI before upgrading. The browser intentionally pins the released
+v1 adapter and its v1.3.5 parsers independently.
 
 | Crate | Standalone library API | Native storage |
 |---|---|---|

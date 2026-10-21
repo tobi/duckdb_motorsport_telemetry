@@ -1,4 +1,5 @@
 pub mod channel_map;
+mod table;
 mod unit_sql;
 
 #[cfg(not(target_os = "emscripten"))]
@@ -6,15 +7,9 @@ use aim_telemetry::AimFile;
 use channel_map::ChannelMap;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use cosworth_telemetry::CosworthFile;
-use duckdb::{
-    core::{DataChunkHandle, FlatVector, Inserter, LogicalTypeHandle, LogicalTypeId},
-    vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
-    Connection, Result,
-};
-use duckdb_loadable_macros::duckdb_entrypoint_c_api;
+use duckdb_loadable_macros::duckdb_entrypoint_c_api_v2;
+use duckdb_neo::extension::Extension;
 use glob::glob;
-#[cfg(target_os = "emscripten")]
-use libduckdb_sys as ffi;
 use motec_telemetry::{
     motec_sidecar_path, write_motec_bytes, write_motec_ldx_bytes, MotecFile, MotecMetadata,
 };
@@ -25,13 +20,15 @@ use motorsport_telemetry_core::{
 use racelogic_telemetry::RacelogicFile;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-#[cfg(target_os = "emscripten")]
-use std::ffi::{c_void, CString};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
+};
+use table::{
+    BindInfo, ChunkWriter as DataChunkHandle, InitInfo, SqlType as LogicalTypeHandle,
+    SqlType as LogicalTypeId, TableFunctionInfo, TelemetryTable,
 };
 
 pub(crate) const VECTOR_SIZE: u64 = 2048;
@@ -39,35 +36,39 @@ const SAMPLES_COLUMN_COUNT: u64 = 10;
 const CHANNELS_COLUMN_COUNT: u64 = 15;
 const SESSION_FIXED_COLUMNS: u64 = 9;
 
-pub(crate) trait FlatVectorExt {
-    fn typed_slice<T>(&mut self) -> &mut [T];
-}
-impl FlatVectorExt for FlatVector<'_> {
-    fn typed_slice<T>(&mut self) -> &mut [T] {
-        unsafe { self.as_mut_slice::<T>() }
-    }
-}
-
 pub(crate) fn ty(id: LogicalTypeId) -> LogicalTypeHandle {
-    LogicalTypeHandle::from(id)
+    id
 }
-fn named_string(bind: &BindInfo, name: &str) -> Option<String> {
-    bind.get_named_parameter(name).map(|v| v.to_string())
+fn named_string(bind: &BindInfo, name: &str) -> duckdb_neo::Result<Option<String>> {
+    bind.get_named_parameter(name)
+        .map(|v| v.get::<String>())
+        .transpose()
+        .map(Option::flatten)
 }
-fn named_i64(bind: &BindInfo, name: &str) -> Option<i64> {
-    bind.get_named_parameter(name).map(|v| v.to_int64())
+fn named_i64(bind: &BindInfo, name: &str) -> duckdb_neo::Result<Option<i64>> {
+    bind.get_named_parameter(name)
+        .map(|v| v.get::<i64>())
+        .transpose()
+        .map(Option::flatten)
 }
-fn named_bool(bind: &BindInfo, name: &str) -> Option<bool> {
-    bind.get_named_parameter(name).map(|v| v.to_int64() != 0)
+fn named_bool(bind: &BindInfo, name: &str) -> duckdb_neo::Result<Option<bool>> {
+    bind.get_named_parameter(name)
+        .map(|v| v.get::<bool>())
+        .transpose()
+        .map(Option::flatten)
 }
 fn named_string_list(bind: &BindInfo, name: &str) -> Result<Vec<String>, Box<dyn Error>> {
     let Some(value) = bind.get_named_parameter(name) else {
         return Ok(Vec::new());
     };
-    let values = value
-        .to_list()
-        .ok_or_else(|| format!("{name} must be a list of strings"))?;
-    Ok(values.into_iter().map(|value| value.to_string()).collect())
+    value
+        .children()?
+        .iter()
+        .map(|cell| {
+            cell.get::<String>()?
+                .ok_or_else(|| "list entries must not be NULL".into())
+        })
+        .collect()
 }
 
 /// Read a SQL `VARCHAR[][]` named argument without introducing another mapping
@@ -81,25 +82,29 @@ fn named_string_rows(
         return Ok(Vec::new());
     };
     let rows = value
-        .to_list()
-        .ok_or_else(|| format!("{name} must be a list of lists"))?;
-    rows.into_iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let cells = row
-                .to_list()
-                .ok_or_else(|| format!("{name} row {} must be a list", index + 1))?;
-            if cells.len() != width {
-                return Err(format!(
-                    "{name} row {} must contain {width} strings, got {}",
-                    index + 1,
-                    cells.len()
-                )
-                .into());
-            }
-            Ok(cells.into_iter().map(|cell| cell.to_string()).collect())
+        .children()?
+        .iter()
+        .map(|row| {
+            row.children()?
+                .iter()
+                .map(|cell| {
+                    cell.get::<String>()?
+                        .ok_or_else(|| "mapping cells must not be NULL".into())
+                })
+                .collect::<Result<Vec<_>, Box<dyn Error>>>()
         })
-        .collect()
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    for (index, cells) in rows.iter().enumerate() {
+        if cells.len() != width {
+            return Err(format!(
+                "{name} row {} must contain {width} strings, got {}",
+                index + 1,
+                cells.len()
+            )
+            .into());
+        }
+    }
+    Ok(rows)
 }
 
 /// Read the `channel_map` named argument.
@@ -108,7 +113,7 @@ fn named_string_rows(
 /// live in version control instead of being pasted into every query. A value
 /// containing no `->` and naming an existing file is treated as a path.
 fn named_channel_map(bind: &BindInfo) -> Result<ChannelMap, Box<dyn Error>> {
-    let Some(value) = named_string(bind, "channel_map") else {
+    let Some(value) = named_string(bind, "channel_map")? else {
         return Ok(ChannelMap::default());
     };
     let trimmed = value.trim();
@@ -126,7 +131,7 @@ fn named_timestamp(bind: &BindInfo, name: &str) -> Result<Option<i64>, Box<dyn E
     let Some(value) = bind.get_named_parameter(name) else {
         return Ok(None);
     };
-    let text = value.to_string();
+    let text = value.dbg_string()?;
     let micros = DateTime::parse_from_rfc3339(&text)
         .map(|value| value.timestamp_micros())
         .or_else(|_| {
@@ -289,76 +294,12 @@ fn file_timestamps(path: &Path) -> (i64, i64) {
 
 #[cfg(target_os = "emscripten")]
 fn read_vfs(bind: &BindInfo, path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    // BindInfo is a one-pointer wrapper in duckdb-rs. The public wrapper does not
-    // expose that pointer, while DuckDB's VFS API requires the raw bind info.
-    debug_assert_eq!(
-        std::mem::size_of::<BindInfo>(),
-        std::mem::size_of::<ffi::duckdb_bind_info>()
-    );
-    let info = unsafe { *(bind as *const BindInfo as *const ffi::duckdb_bind_info) };
-    let mut context: ffi::duckdb_client_context = std::ptr::null_mut();
-    unsafe { ffi::duckdb_table_function_get_client_context(info, &mut context) };
-    if context.is_null() {
-        return Err("DuckDB did not expose a client context".into());
-    }
-    let mut filesystem = unsafe { ffi::duckdb_client_context_get_file_system(context) };
-    if filesystem.is_null() {
-        unsafe { ffi::duckdb_destroy_client_context(&mut context) };
-        return Err("DuckDB did not expose its virtual filesystem".into());
-    }
-    let c_path = CString::new(path)?;
-    let mut options = unsafe { ffi::duckdb_create_file_open_options() };
-    unsafe {
-        ffi::duckdb_file_open_options_set_flag(
-            options,
-            ffi::duckdb_file_flag_DUCKDB_FILE_FLAG_READ,
-            true,
-        )
-    };
-    let mut handle: ffi::duckdb_file_handle = std::ptr::null_mut();
-    let state =
-        unsafe { ffi::duckdb_file_system_open(filesystem, c_path.as_ptr(), options, &mut handle) };
-    unsafe { ffi::duckdb_destroy_file_open_options(&mut options) };
-    if state != ffi::DuckDBSuccess || handle.is_null() {
-        unsafe {
-            ffi::duckdb_destroy_file_system(&mut filesystem);
-            ffi::duckdb_destroy_client_context(&mut context);
-        }
-        return Err(format!("cannot open telemetry file {path} through DuckDB's VFS").into());
-    }
-    let size = unsafe { ffi::duckdb_file_handle_size(handle) };
-    if size < 0 || size > 4 * 1024 * 1024 * 1024_i64 {
-        unsafe {
-            ffi::duckdb_destroy_file_handle(&mut handle);
-            ffi::duckdb_destroy_file_system(&mut filesystem);
-            ffi::duckdb_destroy_client_context(&mut context);
-        }
-        return Err(format!("invalid or excessive telemetry file size for {path}: {size}").into());
-    }
-    let mut data = vec![0u8; size as usize];
-    let mut read = 0usize;
-    while read < data.len() {
-        let count = unsafe {
-            ffi::duckdb_file_handle_read(
-                handle,
-                data[read..].as_mut_ptr().cast::<c_void>(),
-                (data.len() - read) as i64,
-            )
-        };
-        if count <= 0 {
-            break;
-        }
-        read += count as usize;
-    }
-    unsafe {
-        ffi::duckdb_destroy_file_handle(&mut handle);
-        ffi::duckdb_destroy_file_system(&mut filesystem);
-        ffi::duckdb_destroy_client_context(&mut context);
-    }
-    if read != data.len() {
-        return Err(format!("short read for {path}: {read} of {} bytes", data.len()).into());
-    }
-    Ok(data)
+    use duckdb_neo::file::{FileBuilder, FileSystem};
+    let fs = FileSystem::new(bind.context)?;
+    let file = FileBuilder::new(&fs, path)?.read().open()?;
+    let mut bytes = vec![0; usize::try_from(file.size()?)?];
+    file.read_exact_at(0, &mut bytes)?;
+    Ok(bytes)
 }
 
 /// How much of a file a table function needs.
@@ -434,7 +375,7 @@ fn open_paths_with(
             "ld" => "motec",
             "vbo" => "vbo",
             "mp4" => "aimd",
-            // `.telemetry` (zstd MTJ or legacy zip), `.telemetry.jsonl[.zstd]`
+            // `.telemetry` (zstd MTJ), `.telemetry.jsonl[.zstd]`
             "telemetry" => "telemetry",
             "jsonl" | "zstd" | "zst" | "mtj" if is_jsonl_recording_path(&path) => "telemetry",
             _ => continue,
@@ -513,16 +454,19 @@ struct SamplesInit {
     projected: Vec<u64>,
 }
 
-struct SamplesVTab;
+struct SamplesScan;
 
-impl VTab for SamplesVTab {
+impl TelemetryTable for SamplesScan {
     type BindData = SamplesBind;
     type InitData = SamplesInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        let pattern = bind.get_parameter(0).to_string();
+        let pattern = bind
+            .get_parameter(0)?
+            .get::<String>()?
+            .ok_or("path must not be NULL")?;
         let files = open_paths(bind, &pattern, None, None, None)?;
-        let filter_value = named_string(bind, "channel");
+        let filter_value = named_string(bind, "channel")?;
         let channel_filter = parse_channel_filter(filter_value.as_deref());
         if !channel_filter.is_empty() {
             let found = files
@@ -540,8 +484,8 @@ impl VTab for SamplesVTab {
                 );
             }
         }
-        let start_ns = named_i64(bind, "start_ns").unwrap_or(0).max(0) as u64;
-        let end_ns = named_i64(bind, "end_ns").unwrap_or(i64::MAX).max(0) as u64;
+        let start_ns = named_i64(bind, "start_ns")?.unwrap_or(0).max(0) as u64;
+        let end_ns = named_i64(bind, "end_ns")?.unwrap_or(i64::MAX).max(0) as u64;
         if end_ns < start_ns {
             return Err("end_ns must be greater than or equal to start_ns".into());
         }
@@ -556,16 +500,16 @@ impl VTab for SamplesVTab {
             map.validate(&available)?;
         }
 
-        bind.add_result_column("file", ty(LogicalTypeId::Varchar));
-        bind.add_result_column("format", ty(LogicalTypeId::Varchar));
-        bind.add_result_column("channel_id", ty(LogicalTypeId::UInteger));
-        bind.add_result_column("channel", ty(LogicalTypeId::Varchar));
-        bind.add_result_column("unit", ty(LogicalTypeId::Varchar));
-        bind.add_result_column("unit_source", ty(LogicalTypeId::Varchar));
-        bind.add_result_column("frequency_hz", ty(LogicalTypeId::Double));
-        bind.add_result_column("sample_index", ty(LogicalTypeId::UBigint));
-        bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
-        bind.add_result_column("value", ty(LogicalTypeId::Double));
+        bind.add_result_column("file", ty(LogicalTypeId::Varchar))?;
+        bind.add_result_column("format", ty(LogicalTypeId::Varchar))?;
+        bind.add_result_column("channel_id", ty(LogicalTypeId::UInteger))?;
+        bind.add_result_column("channel", ty(LogicalTypeId::Varchar))?;
+        bind.add_result_column("unit", ty(LogicalTypeId::Varchar))?;
+        bind.add_result_column("unit_source", ty(LogicalTypeId::Varchar))?;
+        bind.add_result_column("frequency_hz", ty(LogicalTypeId::Double))?;
+        bind.add_result_column("sample_index", ty(LogicalTypeId::UBigint))?;
+        bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint))?;
+        bind.add_result_column("value", ty(LogicalTypeId::Double))?;
 
         let cardinality = files
             .iter()
@@ -575,7 +519,7 @@ impl VTab for SamplesVTab {
             })
             .map(|c| c.sample_count)
             .sum();
-        bind.set_cardinality(cardinality, start_ns == 0 && end_ns == i64::MAX as u64);
+        bind.set_cardinality(cardinality, start_ns == 0 && end_ns == i64::MAX as u64)?;
         Ok(SamplesBind {
             files,
             channel_filter,
@@ -586,7 +530,7 @@ impl VTab for SamplesVTab {
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
-        let bind = unsafe { &*init.get_bind_data::<SamplesBind>() };
+        let bind = init.get_bind_data::<SamplesBind>();
         let mut segments = Vec::new();
         for (file_idx, file) in bind.files.iter().enumerate() {
             for (channel_idx, channel) in file.channels().iter().enumerate() {
@@ -641,7 +585,7 @@ impl VTab for SamplesVTab {
         let state = func.get_init_data();
         let index = state.next.fetch_add(1, Ordering::Relaxed);
         let Some(segment) = state.segments.get(index) else {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         };
         let bind = func.get_bind_data();
@@ -656,55 +600,55 @@ impl VTab for SamplesVTab {
             }
             match original {
                 0 => {
-                    let v = output.flat_vector(out_col);
+                    let mut v = output.flat_vector(out_col)?;
                     for row in 0..n {
-                        v.insert(row, file.path());
+                        v.insert(row, file.path())?;
                     }
                 }
                 1 => {
-                    let vector = output.flat_vector(out_col);
+                    let mut vector = output.flat_vector(out_col)?;
                     for row in 0..n {
-                        vector.insert(row, file.format());
+                        vector.insert(row, file.format())?;
                     }
                 }
-                2 => output.flat_vector(out_col).typed_slice::<u32>()[..n].fill(channel.id),
+                2 => output.flat_vector(out_col)?.typed_slice::<u32>()?[..n].fill(channel.id),
                 3 => {
-                    let vector = output.flat_vector(out_col);
+                    let mut vector = output.flat_vector(out_col)?;
                     let name = bind.map.name_for(&channel.name);
                     for row in 0..n {
-                        vector.insert(row, name);
+                        vector.insert(row, name)?;
                     }
                 }
                 4 => {
-                    let vector = output.flat_vector(out_col);
+                    let mut vector = output.flat_vector(out_col)?;
                     let (unit, _) =
                         bind.map
                             .unit_for(&channel.name, &channel.unit, channel.unit_source);
                     for row in 0..n {
-                        vector.insert(row, unit.as_str());
+                        vector.insert(row, unit.as_str())?;
                     }
                 }
                 5 => {
-                    let vector = output.flat_vector(out_col);
+                    let mut vector = output.flat_vector(out_col)?;
                     let (_, source) =
                         bind.map
                             .unit_for(&channel.name, &channel.unit, channel.unit_source);
                     for row in 0..n {
-                        vector.insert(row, source.name());
+                        vector.insert(row, source.name())?;
                     }
                 }
-                6 => output.flat_vector(out_col).typed_slice::<f64>()[..n]
+                6 => output.flat_vector(out_col)?.typed_slice::<f64>()?[..n]
                     .fill(1e9 / chunk.sample_period_ns as f64),
                 7 => {
-                    let mut vector = output.flat_vector(out_col);
-                    let dst = &mut vector.typed_slice::<u64>()[..n];
+                    let mut vector = output.flat_vector(out_col)?;
+                    let dst = &mut vector.typed_slice::<u64>()?[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
                         *value = chunk.sample_base + segment.local_start + row as u64;
                     }
                 }
                 8 => {
-                    let mut vector = output.flat_vector(out_col);
-                    let dst = &mut vector.typed_slice::<i64>()[..n];
+                    let mut vector = output.flat_vector(out_col)?;
+                    let dst = &mut vector.typed_slice::<i64>()?[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
                         *value = file.sample_time_ns(
                             segment.channel,
@@ -714,9 +658,9 @@ impl VTab for SamplesVTab {
                     }
                 }
                 9 => {
-                    let mut vector = output.flat_vector(out_col);
+                    let mut vector = output.flat_vector(out_col)?;
                     let rule = bind.map.rule_for(&channel.name);
-                    let dst = &mut vector.typed_slice::<f64>()[..n];
+                    let dst = &mut vector.typed_slice::<f64>()?[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
                         let raw = file.decode(
                             segment.channel,
@@ -731,10 +675,10 @@ impl VTab for SamplesVTab {
                         };
                     }
                 }
-                _ => output.flat_vector(out_col).typed_slice::<i64>()[..n].fill(index as i64),
+                _ => output.flat_vector(out_col)?.typed_slice::<i64>()?[..n].fill(index as i64),
             }
         }
-        output.set_len(n);
+        output.set_len(n)?;
         Ok(())
     }
 
@@ -766,16 +710,19 @@ struct ChannelsInit {
     next: AtomicUsize,
     projected: Vec<u64>,
 }
-struct ChannelsVTab;
+struct ChannelsScan;
 
-impl VTab for ChannelsVTab {
+impl TelemetryTable for ChannelsScan {
     type BindData = ChannelsBind;
     type InitData = ChannelsInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
         let files = open_paths_with(
             bind,
-            &bind.get_parameter(0).to_string(),
+            &bind
+                .get_parameter(0)?
+                .get::<String>()?
+                .ok_or("path must not be NULL")?,
             None,
             None,
             None,
@@ -810,19 +757,19 @@ impl VTab for ChannelsVTab {
             ("chunk_count", LogicalTypeId::UBigint),
             ("duration_ns", LogicalTypeId::UBigint),
         ] {
-            bind.add_result_column(name, ty(logical));
+            bind.add_result_column(name, ty(logical))?;
         }
         let rows = files
             .iter()
             .enumerate()
             .flat_map(|(fi, file)| (0..file.channels().len()).map(move |ci| (fi, ci)))
             .collect::<Vec<_>>();
-        bind.set_cardinality(rows.len() as u64, true);
+        bind.set_cardinality(rows.len() as u64, true)?;
         Ok(ChannelsBind { files, map, rows })
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
-        let bind = unsafe { &*init.get_bind_data::<ChannelsBind>() };
+        let bind = init.get_bind_data::<ChannelsBind>();
         init.set_max_threads(worker_count(bind.rows.len()));
         Ok(ChannelsInit {
             next: AtomicUsize::new(0),
@@ -840,7 +787,7 @@ impl VTab for ChannelsVTab {
             .fetch_add(VECTOR_SIZE as usize, Ordering::Relaxed);
         let bind = func.get_bind_data();
         if start >= bind.rows.len() {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         }
         let end = (start + VECTOR_SIZE as usize).min(bind.rows.len());
@@ -849,26 +796,26 @@ impl VTab for ChannelsVTab {
             if out_col >= output.num_columns() {
                 break;
             }
-            let mut vector = output.flat_vector(out_col);
+            let mut vector = output.flat_vector(out_col)?;
             for (row, &(fi, ci)) in bind.rows[start..end].iter().enumerate() {
                 let file = &bind.files[fi];
                 let channel = &file.channels()[ci];
                 match original {
-                    0 => vector.insert(row, file.path()),
-                    1 => vector.insert(row, file.format()),
-                    2 => vector.typed_slice::<u32>()[row] = channel.id,
-                    3 => vector.insert(row, bind.map.name_for(&channel.name)),
+                    0 => vector.insert(row, file.path())?,
+                    1 => vector.insert(row, file.format())?,
+                    2 => vector.typed_slice::<u32>()?[row] = channel.id,
+                    3 => vector.insert(row, bind.map.name_for(&channel.name))?,
                     4 => {
                         let (unit, _) =
                             bind.map
                                 .unit_for(&channel.name, &channel.unit, channel.unit_source);
-                        vector.insert(row, unit.as_str())
+                        vector.insert(row, unit.as_str())?
                     }
                     5 => {
                         let (_, source) =
                             bind.map
                                 .unit_for(&channel.name, &channel.unit, channel.unit_source);
-                        vector.insert(row, source.name())
+                        vector.insert(row, source.name())?
                     }
                     // Registry view of the unit: canonical spelling and physical
                     // dimension. NULL when the unit is absent or unrecognised,
@@ -878,8 +825,8 @@ impl VTab for ChannelsVTab {
                             bind.map
                                 .unit_for(&channel.name, &channel.unit, channel.unit_source);
                         match motorsport_telemetry_core::units::normalize(&unit) {
-                            Some(canonical) => vector.insert(row, canonical),
-                            None => vector.set_null(row),
+                            Some(canonical) => vector.insert(row, canonical)?,
+                            None => vector.set_null(row)?,
                         }
                     }
                     7 => {
@@ -887,34 +834,34 @@ impl VTab for ChannelsVTab {
                             bind.map
                                 .unit_for(&channel.name, &channel.unit, channel.unit_source);
                         match motorsport_telemetry_core::units::lookup(&unit) {
-                            Some(def) => vector.insert(row, def.dimension.name()),
-                            None => vector.set_null(row),
+                            Some(def) => vector.insert(row, def.dimension.name())?,
+                            None => vector.set_null(row)?,
                         }
                     }
-                    8 => vector.typed_slice::<u32>()[row] = channel.sample_type.code(),
-                    9 => vector.insert(row, channel.sample_type.name()),
+                    8 => vector.typed_slice::<u32>()?[row] = channel.sample_type.code(),
+                    9 => vector.insert(row, channel.sample_type.name())?,
                     10 => {
                         if let Some(value) = channel.frequency_hz() {
-                            vector.typed_slice::<f64>()[row] = value
+                            vector.typed_slice::<f64>()?[row] = value
                         } else {
-                            vector.set_null(row)
+                            vector.set_null(row)?
                         }
                     }
                     11 => {
                         if let Some(period) = channel.first_period_ns() {
-                            vector.typed_slice::<u64>()[row] = period
+                            vector.typed_slice::<u64>()?[row] = period
                         } else {
-                            vector.set_null(row)
+                            vector.set_null(row)?
                         }
                     }
-                    12 => vector.typed_slice::<u64>()[row] = channel.sample_count,
-                    13 => vector.typed_slice::<u64>()[row] = channel.chunks.len() as u64,
-                    14 => vector.typed_slice::<u64>()[row] = channel.duration_ns,
-                    _ => vector.typed_slice::<i64>()[row] = (start + row) as i64,
+                    12 => vector.typed_slice::<u64>()?[row] = channel.sample_count,
+                    13 => vector.typed_slice::<u64>()?[row] = channel.chunks.len() as u64,
+                    14 => vector.typed_slice::<u64>()?[row] = channel.duration_ns,
+                    _ => vector.typed_slice::<i64>()?[row] = (start + row) as i64,
                 }
             }
         }
-        output.set_len(n);
+        output.set_len(n)?;
         Ok(())
     }
 
@@ -968,19 +915,16 @@ fn is_jsonl_recording_path(_path: &Path) -> bool {
     false
 }
 
-/// Opens a `.telemetry` (either container, decided by content) or an MTJ
+/// Opens a `.telemetry` (zstd-compressed JSONL) or an MTJ
 /// document as a shared source.
 #[cfg(not(target_os = "emscripten"))]
 fn open_telemetry_source(path: &Path) -> Result<SourceRef, Box<dyn Error>> {
-    if is_jsonl_recording_path(path) {
-        return Ok(Arc::new(telemetry_format::JsonlRecording::open(path)?));
-    }
-    Ok(Arc::from(telemetry_format::open_telemetry(path)?))
+    Ok(Arc::new(telemetry_format::JsonlRecording::open(path)?))
 }
 
 /// Summary of a `.telemetry` / MTJ recording with the stint model resolved,
 /// in O(header): an MTJ document is decoded through its first two lines
-/// only; a legacy zip maps its catalog and probes speed for classification.
+/// only; older MTJ documents without summaries fall back to a full parse.
 #[cfg(not(target_os = "emscripten"))]
 fn telemetry_recording_metadata(path: &Path) -> Result<FileMetadata, Box<dyn Error>> {
     Ok(telemetry_format::read_metadata(path)?)
@@ -1020,20 +964,34 @@ struct FileMetadataInit {
     projected: Vec<u64>,
 }
 
-struct FileMetadataVTab;
+struct FileMetadataScan;
 
-impl VTab for FileMetadataVTab {
+impl TelemetryTable for FileMetadataScan {
     type BindData = FileMetadataBind;
     type InitData = FileMetadataInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
         #[cfg(not(target_os = "emscripten"))]
-        let metadata = fast_file_metadata(&bind.get_parameter(0).to_string())?;
+        let metadata = fast_file_metadata(
+            &bind
+                .get_parameter(0)?
+                .get::<String>()?
+                .ok_or("path must not be NULL")?,
+        )?;
         #[cfg(target_os = "emscripten")]
-        let metadata = open_paths(bind, &bind.get_parameter(0).to_string(), None, None, None)?
-            .iter()
-            .map(|file| read_source_metadata(file.deref()))
-            .collect::<Vec<_>>();
+        let metadata = open_paths(
+            bind,
+            &bind
+                .get_parameter(0)?
+                .get::<String>()?
+                .ok_or("path must not be NULL")?,
+            None,
+            None,
+            None,
+        )?
+        .iter()
+        .map(|file| read_source_metadata(file.deref()))
+        .collect::<Vec<_>>();
         for (name, logical) in [
             ("file", LogicalTypeId::Varchar),
             ("format", LogicalTypeId::Varchar),
@@ -1063,14 +1021,14 @@ impl VTab for FileMetadataVTab {
             ("fastest_lap_label", LogicalTypeId::Varchar),
             ("source_format", LogicalTypeId::Varchar),
         ] {
-            bind.add_result_column(name, ty(logical));
+            bind.add_result_column(name, ty(logical))?;
         }
-        bind.set_cardinality(metadata.len() as u64, true);
+        bind.set_cardinality(metadata.len() as u64, true)?;
         Ok(FileMetadataBind { metadata })
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
-        let bind = unsafe { &*init.get_bind_data::<FileMetadataBind>() };
+        let bind = init.get_bind_data::<FileMetadataBind>();
         init.set_max_threads(worker_count(bind.metadata.len()));
         Ok(FileMetadataInit {
             next: AtomicUsize::new(0),
@@ -1088,7 +1046,7 @@ impl VTab for FileMetadataVTab {
             .fetch_add(VECTOR_SIZE as usize, Ordering::Relaxed);
         let bind = func.get_bind_data();
         if start >= bind.metadata.len() {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         }
         let end = (start + VECTOR_SIZE as usize).min(bind.metadata.len());
@@ -1097,28 +1055,28 @@ impl VTab for FileMetadataVTab {
             if out_col >= output.num_columns() {
                 break;
             }
-            let mut vector = output.flat_vector(out_col);
+            let mut vector = output.flat_vector(out_col)?;
             for (row, metadata) in bind.metadata[start..end].iter().enumerate() {
                 match original {
-                    0 => vector.insert(row, metadata.path.as_str()),
-                    1 => vector.insert(row, metadata.format.as_str()),
+                    0 => vector.insert(row, metadata.path.as_str())?,
+                    1 => vector.insert(row, metadata.format.as_str())?,
                     2 => match &metadata.session_key {
-                        Some(value) => vector.insert(row, value.as_str()),
-                        None => vector.set_null(row),
+                        Some(value) => vector.insert(row, value.as_str())?,
+                        None => vector.set_null(row)?,
                     },
                     3 => match metadata.absolute_start_ns {
-                        Some(value) => vector.typed_slice::<u64>()[row] = value,
-                        None => vector.set_null(row),
+                        Some(value) => vector.typed_slice::<u64>()?[row] = value,
+                        None => vector.set_null(row)?,
                     },
                     4 => match metadata.absolute_end_ns {
-                        Some(value) => vector.typed_slice::<u64>()[row] = value,
-                        None => vector.set_null(row),
+                        Some(value) => vector.typed_slice::<u64>()?[row] = value,
+                        None => vector.set_null(row)?,
                     },
-                    5 => vector.typed_slice::<u64>()[row] = metadata.duration_ns,
-                    6 => vector.typed_slice::<u64>()[row] = metadata.channel_count as u64,
-                    7 => vector.typed_slice::<u64>()[row] = metadata.sampled_channel_count as u64,
-                    8 => vector.typed_slice::<u64>()[row] = metadata.sample_count,
-                    9 => vector.typed_slice::<u64>()[row] = metadata.schema_hash,
+                    5 => vector.typed_slice::<u64>()?[row] = metadata.duration_ns,
+                    6 => vector.typed_slice::<u64>()?[row] = metadata.channel_count as u64,
+                    7 => vector.typed_slice::<u64>()?[row] = metadata.sampled_channel_count as u64,
+                    8 => vector.typed_slice::<u64>()?[row] = metadata.sample_count,
+                    9 => vector.typed_slice::<u64>()?[row] = metadata.schema_hash,
                     10 => {
                         let value = metadata
                             .driver_ids
@@ -1126,34 +1084,34 @@ impl VTab for FileMetadataVTab {
                             .map(ToString::to_string)
                             .collect::<Vec<_>>()
                             .join(",");
-                        vector.insert(row, value.as_str())
+                        vector.insert(row, value.as_str())?
                     }
-                    11 => vector.typed_slice::<u64>()[row] = metadata.laps.len() as u64,
+                    11 => vector.typed_slice::<u64>()?[row] = metadata.laps.len() as u64,
                     12 => match &metadata.fastest_lap {
-                        Some(lap) => vector.typed_slice::<i64>()[row] = lap.number,
-                        None => vector.set_null(row),
+                        Some(lap) => vector.typed_slice::<i64>()?[row] = lap.number,
+                        None => vector.set_null(row)?,
                     },
                     13 => match &metadata.fastest_lap {
-                        Some(lap) => vector.typed_slice::<u64>()[row] = lap.duration_ns,
-                        None => vector.set_null(row),
+                        Some(lap) => vector.typed_slice::<u64>()?[row] = lap.duration_ns,
+                        None => vector.set_null(row)?,
                     },
                     14 => match metadata.video_frame_count {
-                        Some(value) => vector.typed_slice::<u64>()[row] = value,
-                        None => vector.set_null(row),
+                        Some(value) => vector.typed_slice::<u64>()?[row] = value,
+                        None => vector.set_null(row)?,
                     },
-                    15 => vector.insert(row, metadata.identity.driver.as_str()),
-                    16 => vector.insert(row, metadata.identity.vehicle.as_str()),
-                    17 => vector.insert(row, metadata.identity.venue.as_str()),
-                    18 => vector.insert(row, metadata.identity.event.as_str()),
-                    19 => vector.insert(row, metadata.identity.session.as_str()),
-                    20 => vector.insert(row, metadata.identity.date.as_str()),
-                    21 => vector.insert(row, metadata.identity.time.as_str()),
+                    15 => vector.insert(row, metadata.identity.driver.as_str())?,
+                    16 => vector.insert(row, metadata.identity.vehicle.as_str())?,
+                    17 => vector.insert(row, metadata.identity.venue.as_str())?,
+                    18 => vector.insert(row, metadata.identity.event.as_str())?,
+                    19 => vector.insert(row, metadata.identity.session.as_str())?,
+                    20 => vector.insert(row, metadata.identity.date.as_str())?,
+                    21 => vector.insert(row, metadata.identity.time.as_str())?,
                     22 => match &metadata.absolute_clock {
-                        Some(value) => vector.insert(row, value.as_str()),
-                        None => vector.set_null(row),
+                        Some(value) => vector.insert(row, value.as_str())?,
+                        None => vector.set_null(row)?,
                     },
                     23 => {
-                        vector.typed_slice::<u64>()[row] = metadata
+                        vector.typed_slice::<u64>()?[row] = metadata
                             .laps
                             .iter()
                             .filter(|lap| lap.kind.is_flying())
@@ -1161,19 +1119,19 @@ impl VTab for FileMetadataVTab {
                             as u64
                     }
                     24 => {
-                        vector.typed_slice::<u64>()[row] =
+                        vector.typed_slice::<u64>()?[row] =
                             u64::from(metadata.laps.iter().map(|lap| lap.stint).max().unwrap_or(0))
                     }
                     25 => match &metadata.fastest_lap {
-                        Some(lap) => vector.insert(row, lap.label().as_str()),
-                        None => vector.set_null(row),
+                        Some(lap) => vector.insert(row, lap.label().as_str())?,
+                        None => vector.set_null(row)?,
                     },
-                    26 => vector.insert(row, metadata.source_format.as_str()),
+                    26 => vector.insert(row, metadata.source_format.as_str())?,
                     _ => unreachable!(),
                 }
             }
         }
-        output.set_len(n);
+        output.set_len(n)?;
         Ok(())
     }
 
@@ -1197,20 +1155,34 @@ struct LapsInit {
     projected: Vec<u64>,
 }
 
-struct LapsVTab;
+struct LapsScan;
 
-impl VTab for LapsVTab {
+impl TelemetryTable for LapsScan {
     type BindData = LapsBind;
     type InitData = LapsInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
         #[cfg(not(target_os = "emscripten"))]
-        let metadata = fast_file_metadata(&bind.get_parameter(0).to_string())?;
+        let metadata = fast_file_metadata(
+            &bind
+                .get_parameter(0)?
+                .get::<String>()?
+                .ok_or("path must not be NULL")?,
+        )?;
         #[cfg(target_os = "emscripten")]
-        let metadata = open_paths(bind, &bind.get_parameter(0).to_string(), None, None, None)?
-            .iter()
-            .map(|file| read_source_metadata(file.deref()))
-            .collect::<Vec<_>>();
+        let metadata = open_paths(
+            bind,
+            &bind
+                .get_parameter(0)?
+                .get::<String>()?
+                .ok_or("path must not be NULL")?,
+            None,
+            None,
+            None,
+        )?
+        .iter()
+        .map(|file| read_source_metadata(file.deref()))
+        .collect::<Vec<_>>();
         let rows = metadata
             .into_iter()
             .flat_map(|file| {
@@ -1236,14 +1208,14 @@ impl VTab for LapsVTab {
             ("duration_ns", LogicalTypeId::UBigint),
             ("first_video_frame", LogicalTypeId::UBigint),
         ] {
-            bind.add_result_column(name, ty(logical));
+            bind.add_result_column(name, ty(logical))?;
         }
-        bind.set_cardinality(rows.len() as u64, true);
+        bind.set_cardinality(rows.len() as u64, true)?;
         Ok(LapsBind { rows })
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
-        let bind = unsafe { &*init.get_bind_data::<LapsBind>() };
+        let bind = init.get_bind_data::<LapsBind>();
         init.set_max_threads(worker_count(bind.rows.len()));
         Ok(LapsInit {
             next: AtomicUsize::new(0),
@@ -1261,7 +1233,7 @@ impl VTab for LapsVTab {
             .fetch_add(VECTOR_SIZE as usize, Ordering::Relaxed);
         let bind = func.get_bind_data();
         if start >= bind.rows.len() {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         }
         let end = (start + VECTOR_SIZE as usize).min(bind.rows.len());
@@ -1270,30 +1242,30 @@ impl VTab for LapsVTab {
             if out_col >= output.num_columns() {
                 break;
             }
-            let mut vector = output.flat_vector(out_col);
+            let mut vector = output.flat_vector(out_col)?;
             for (row, (path, format, lap)) in bind.rows[start..end].iter().enumerate() {
                 match original {
-                    0 => vector.insert(row, path.as_str()),
-                    1 => vector.insert(row, format.as_str()),
-                    2 => vector.typed_slice::<i64>()[row] = lap.number,
-                    3 => vector.typed_slice::<u32>()[row] = lap.stint,
-                    4 => vector.typed_slice::<i64>()[row] = lap.stint_lap,
-                    5 => vector.insert(row, lap.kind.as_str()),
-                    6 => vector.insert(row, lap.label().as_str()),
-                    7 => vector.typed_slice::<bool>()[row] = lap.kind.is_flying(),
-                    8 => vector.typed_slice::<bool>()[row] = lap.complete,
-                    9 => vector.typed_slice::<u64>()[row] = lap.start_ns,
-                    10 => vector.typed_slice::<u64>()[row] = lap.end_ns,
-                    11 => vector.typed_slice::<u64>()[row] = lap.duration_ns,
+                    0 => vector.insert(row, path.as_str())?,
+                    1 => vector.insert(row, format.as_str())?,
+                    2 => vector.typed_slice::<i64>()?[row] = lap.number,
+                    3 => vector.typed_slice::<u32>()?[row] = lap.stint,
+                    4 => vector.typed_slice::<i64>()?[row] = lap.stint_lap,
+                    5 => vector.insert(row, lap.kind.as_str())?,
+                    6 => vector.insert(row, lap.label().as_str())?,
+                    7 => vector.typed_slice::<bool>()?[row] = lap.kind.is_flying(),
+                    8 => vector.typed_slice::<bool>()?[row] = lap.complete,
+                    9 => vector.typed_slice::<u64>()?[row] = lap.start_ns,
+                    10 => vector.typed_slice::<u64>()?[row] = lap.end_ns,
+                    11 => vector.typed_slice::<u64>()?[row] = lap.duration_ns,
                     12 => match lap.first_video_frame {
-                        Some(frame) => vector.typed_slice::<u64>()[row] = frame,
-                        None => vector.set_null(row),
+                        Some(frame) => vector.typed_slice::<u64>()?[row] = frame,
+                        None => vector.set_null(row)?,
                     },
                     _ => unreachable!(),
                 }
             }
         }
-        output.set_len(n);
+        output.set_len(n)?;
         Ok(())
     }
 
@@ -1309,7 +1281,7 @@ impl VTab for LapsVTab {
 // ── read_telemetry_normalized: the blessed channels, one row per instant ──
 
 /// Column order of `read_telemetry_normalized` after `time_ns` and the
-/// optional `filename`. Mirrors `motorsport_telemetry::NormalizedSample`.
+/// optional `filename`. Mirrors `telemetry::NormalizedSample`.
 #[cfg(not(target_os = "emscripten"))]
 const NORMALIZED_COLUMNS: &[(&str, LogicalTypeId)] = &[
     ("speed_mps", LogicalTypeId::Double),
@@ -1349,34 +1321,37 @@ struct NormalizedInit {
     /// One normalizer per file, built by whichever worker touches the file
     /// first and shared afterwards, so roles, track match, laps, clock and
     /// unit inference are resolved once per file rather than once per chunk.
-    normalizers: Vec<std::sync::OnceLock<motorsport_telemetry::TelemetryNormalizer<'static>>>,
+    normalizers: Vec<std::sync::OnceLock<telemetry::TelemetryNormalizer<'static>>>,
 }
 
 #[cfg(not(target_os = "emscripten"))]
-struct NormalizedVTab;
+struct NormalizedScan;
 
 #[cfg(not(target_os = "emscripten"))]
-impl VTab for NormalizedVTab {
+impl TelemetryTable for NormalizedScan {
     type BindData = NormalizedBind;
     type InitData = NormalizedInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        let pattern = bind.get_parameter(0).to_string();
+        let pattern = bind
+            .get_parameter(0)?
+            .get::<String>()?
+            .ok_or("path must not be NULL")?;
         let create_date_from = named_timestamp(bind, "create_date_from")?;
         let create_date_to = named_timestamp(bind, "create_date_to")?;
         let files = open_paths(bind, &pattern, None, create_date_from, create_date_to)?;
-        let rate = named_i64(bind, "rate").unwrap_or(100);
+        let rate = named_i64(bind, "rate")?.unwrap_or(100);
         if !(1..=5000).contains(&rate) {
             return Err("rate must be between 1 and 5000 Hz".into());
         }
         let rate = rate as u64;
-        let start_ns = named_i64(bind, "start_ns").unwrap_or(0).max(0) as u64;
-        let requested_end = named_i64(bind, "end_ns").unwrap_or(i64::MAX).max(0) as u64;
+        let start_ns = named_i64(bind, "start_ns")?.unwrap_or(0).max(0) as u64;
+        let requested_end = named_i64(bind, "end_ns")?.unwrap_or(i64::MAX).max(0) as u64;
         if requested_end < start_ns {
             return Err("end_ns must be greater than or equal to start_ns".into());
         }
-        let include_filename = named_bool(bind, "filename").unwrap_or(false)
-            || named_bool(bind, "add_filename_as_column").unwrap_or(false);
+        let include_filename = named_bool(bind, "filename")?.unwrap_or(false)
+            || named_bool(bind, "add_filename_as_column")?.unwrap_or(false);
         let ranges = files
             .iter()
             .map(|file| {
@@ -1396,14 +1371,14 @@ impl VTab for NormalizedVTab {
                 (start_ns, end_ns, rows)
             })
             .collect::<Vec<_>>();
-        bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
+        bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint))?;
         if include_filename {
-            bind.add_result_column("filename", ty(LogicalTypeId::Varchar));
+            bind.add_result_column("filename", ty(LogicalTypeId::Varchar))?;
         }
         for (name, logical) in NORMALIZED_COLUMNS {
-            bind.add_result_column(name, ty(*logical));
+            bind.add_result_column(name, ty(logical.clone()))?;
         }
-        bind.set_cardinality(ranges.iter().map(|range| range.2).sum(), true);
+        bind.set_cardinality(ranges.iter().map(|range| range.2).sum(), true)?;
         Ok(NormalizedBind {
             files,
             ranges,
@@ -1413,7 +1388,7 @@ impl VTab for NormalizedVTab {
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
-        let bind = unsafe { &*init.get_bind_data::<NormalizedBind>() };
+        let bind = init.get_bind_data::<NormalizedBind>();
         let mut segments = Vec::new();
         for (file, &(_, _, rows)) in bind.ranges.iter().enumerate() {
             let mut row = 0;
@@ -1443,11 +1418,11 @@ impl VTab for NormalizedVTab {
         func: &TableFunctionInfo<Self>,
         output: &mut DataChunkHandle,
     ) -> Result<(), Box<dyn Error>> {
-        use motorsport_telemetry::SourceExt;
+        use telemetry::SourceExt;
         let state = func.get_init_data();
         let segment_idx = state.next.fetch_add(1, Ordering::Relaxed);
         let Some(segment) = state.segments.get(segment_idx) else {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         };
         let bind = func.get_bind_data();
@@ -1459,11 +1434,7 @@ impl VTab for NormalizedVTab {
             // dropped with the init data, so the `'static` it claims is never
             // observed past the bind data's lifetime.
             let source: &'static dyn TelemetrySource = unsafe { &*Arc::as_ptr(&file.source) };
-            motorsport_telemetry::TelemetryNormalizer::new(
-                source,
-                source.signal_roles(),
-                source.match_track(),
-            )
+            telemetry::TelemetryNormalizer::new(source, source.signal_roles())
         });
         let start_ns = bind.ranges[segment.file].0;
         let n = segment.len as usize;
@@ -1473,7 +1444,7 @@ impl VTab for NormalizedVTab {
                 + u128::from(source_row) * 1_000_000_000u128 / u128::from(bind.rate))
                 as u64
         };
-        let samples: Vec<motorsport_telemetry::NormalizedSample> =
+        let samples: Vec<telemetry::NormalizedSample> =
             (0..n).map(|row| normalizer.sample(time_at(row))).collect();
         let fixed = 1 + usize::from(bind.include_filename);
         for (out_col, original) in state.projected.iter().copied().enumerate() {
@@ -1481,9 +1452,9 @@ impl VTab for NormalizedVTab {
                 break;
             }
             let original = original as usize;
-            let mut vector = output.flat_vector(out_col);
+            let mut vector = output.flat_vector(out_col)?;
             if original == 0 {
-                let dst = &mut vector.typed_slice::<i64>()[..n];
+                let dst = &mut vector.typed_slice::<i64>()?[..n];
                 for (row, value) in dst.iter_mut().enumerate() {
                     *value = time_at(row) as i64;
                 }
@@ -1491,7 +1462,7 @@ impl VTab for NormalizedVTab {
             }
             if bind.include_filename && original == 1 {
                 for row in 0..n {
-                    vector.insert(row, file.path());
+                    vector.insert(row, file.path())?;
                 }
                 continue;
             }
@@ -1500,8 +1471,8 @@ impl VTab for NormalizedVTab {
                 ($field:ident) => {{
                     for (row, sample) in samples.iter().enumerate() {
                         match sample.$field {
-                            Some(value) => vector.typed_slice::<f64>()[row] = value,
-                            None => vector.set_null(row),
+                            Some(value) => vector.typed_slice::<f64>()?[row] = value,
+                            None => vector.set_null(row)?,
                         }
                     }
                 }};
@@ -1521,71 +1492,71 @@ impl VTab for NormalizedVTab {
                 "gear" => {
                     for (row, sample) in samples.iter().enumerate() {
                         match sample.gear {
-                            Some(value) => vector.typed_slice::<i64>()[row] = value,
-                            None => vector.set_null(row),
+                            Some(value) => vector.typed_slice::<i64>()?[row] = value,
+                            None => vector.set_null(row)?,
                         }
                     }
                 }
                 "lap_number" => {
                     for (row, sample) in samples.iter().enumerate() {
                         match sample.lap_number {
-                            Some(value) => vector.typed_slice::<i64>()[row] = value,
-                            None => vector.set_null(row),
+                            Some(value) => vector.typed_slice::<i64>()?[row] = value,
+                            None => vector.set_null(row)?,
                         }
                     }
                 }
                 "stint_lap_number" => {
                     for (row, sample) in samples.iter().enumerate() {
                         match sample.stint_lap_number {
-                            Some(value) => vector.typed_slice::<i64>()[row] = value,
-                            None => vector.set_null(row),
+                            Some(value) => vector.typed_slice::<i64>()?[row] = value,
+                            None => vector.set_null(row)?,
                         }
                     }
                 }
                 "stint" => {
                     for (row, sample) in samples.iter().enumerate() {
                         match sample.stint {
-                            Some(value) => vector.typed_slice::<u32>()[row] = value,
-                            None => vector.set_null(row),
+                            Some(value) => vector.typed_slice::<u32>()?[row] = value,
+                            None => vector.set_null(row)?,
                         }
                     }
                 }
                 "lap_kind" => {
                     for (row, sample) in samples.iter().enumerate() {
                         match sample.lap_kind {
-                            Some(kind) => vector.insert(row, kind.as_str()),
-                            None => vector.set_null(row),
+                            Some(kind) => vector.insert(row, kind.as_str())?,
+                            None => vector.set_null(row)?,
                         }
                     }
                 }
                 "lap_label" => {
                     for (row, sample) in samples.iter().enumerate() {
                         match &sample.lap_label {
-                            Some(label) => vector.insert(row, label.as_str()),
-                            None => vector.set_null(row),
+                            Some(label) => vector.insert(row, label.as_str())?,
+                            None => vector.set_null(row)?,
                         }
                     }
                 }
                 "time_of_day_ns" => {
                     for (row, sample) in samples.iter().enumerate() {
                         match sample.time_of_day_ns {
-                            Some(value) => vector.typed_slice::<u64>()[row] = value,
-                            None => vector.set_null(row),
+                            Some(value) => vector.typed_slice::<u64>()?[row] = value,
+                            None => vector.set_null(row)?,
                         }
                     }
                 }
                 "absolute_time_ns" => {
                     for (row, sample) in samples.iter().enumerate() {
                         match sample.absolute_time_ns {
-                            Some(value) => vector.typed_slice::<u64>()[row] = value,
-                            None => vector.set_null(row),
+                            Some(value) => vector.typed_slice::<u64>()?[row] = value,
+                            None => vector.set_null(row)?,
                         }
                     }
                 }
                 _ => unreachable!(),
             }
         }
-        output.set_len(n);
+        output.set_len(n)?;
         Ok(())
     }
 
@@ -1622,21 +1593,35 @@ struct SessionMetadataInit {
     projected: Vec<u64>,
 }
 
-struct SessionMetadataVTab;
+struct SessionMetadataScan;
 
-impl VTab for SessionMetadataVTab {
+impl TelemetryTable for SessionMetadataScan {
     type BindData = SessionMetadataBind;
     type InitData = SessionMetadataInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
         #[cfg(not(target_os = "emscripten"))]
-        let files = fast_file_metadata(&bind.get_parameter(0).to_string())?;
+        let files = fast_file_metadata(
+            &bind
+                .get_parameter(0)?
+                .get::<String>()?
+                .ok_or("path must not be NULL")?,
+        )?;
         #[cfg(target_os = "emscripten")]
-        let files = open_paths(bind, &bind.get_parameter(0).to_string(), None, None, None)?
-            .iter()
-            .map(|file| read_source_metadata(file.deref()))
-            .collect::<Vec<_>>();
-        let max_gap_seconds = named_i64(bind, "max_gap_seconds").unwrap_or(60);
+        let files = open_paths(
+            bind,
+            &bind
+                .get_parameter(0)?
+                .get::<String>()?
+                .ok_or("path must not be NULL")?,
+            None,
+            None,
+            None,
+        )?
+        .iter()
+        .map(|file| read_source_metadata(file.deref()))
+        .collect::<Vec<_>>();
+        let max_gap_seconds = named_i64(bind, "max_gap_seconds")?.unwrap_or(60);
         if !(0..=86_400).contains(&max_gap_seconds) {
             return Err("max_gap_seconds must be between 0 and 86400".into());
         }
@@ -1653,9 +1638,9 @@ impl VTab for SessionMetadataVTab {
             ("fastest_lap_number", LogicalTypeId::Bigint),
             ("fastest_lap_time_ns", LogicalTypeId::UBigint),
         ] {
-            bind.add_result_column(name, ty(logical));
+            bind.add_result_column(name, ty(logical))?;
         }
-        bind.set_cardinality(sessions.len() as u64, true);
+        bind.set_cardinality(sessions.len() as u64, true)?;
         Ok(SessionMetadataBind { sessions, files })
     }
 
@@ -1676,7 +1661,7 @@ impl VTab for SessionMetadataVTab {
             .fetch_add(VECTOR_SIZE as usize, Ordering::Relaxed);
         let bind = func.get_bind_data();
         if start >= bind.sessions.len() {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         }
         let end = (start + VECTOR_SIZE as usize).min(bind.sessions.len());
@@ -1685,20 +1670,20 @@ impl VTab for SessionMetadataVTab {
             if out_col >= output.num_columns() {
                 break;
             }
-            let mut vector = output.flat_vector(out_col);
+            let mut vector = output.flat_vector(out_col)?;
             for (row, session) in bind.sessions[start..end].iter().enumerate() {
                 match original {
-                    0 => vector.insert(row, session.session_key.as_str()),
-                    1 => vector.typed_slice::<u64>()[row] = session.files.len() as u64,
+                    0 => vector.insert(row, session.session_key.as_str())?,
+                    1 => vector.typed_slice::<u64>()?[row] = session.files.len() as u64,
                     2 => match session.absolute_start_ns {
-                        Some(value) => vector.typed_slice::<u64>()[row] = value,
-                        None => vector.set_null(row),
+                        Some(value) => vector.typed_slice::<u64>()?[row] = value,
+                        None => vector.set_null(row)?,
                     },
                     3 => match session.absolute_end_ns {
-                        Some(value) => vector.typed_slice::<u64>()[row] = value,
-                        None => vector.set_null(row),
+                        Some(value) => vector.typed_slice::<u64>()?[row] = value,
+                        None => vector.set_null(row)?,
                     },
-                    4 => vector.typed_slice::<u64>()[row] = session.duration_ns,
+                    4 => vector.typed_slice::<u64>()?[row] = session.duration_ns,
                     5 => {
                         let value = session
                             .files
@@ -1709,23 +1694,23 @@ impl VTab for SessionMetadataVTab {
                             .map(|driver| driver.to_string())
                             .collect::<Vec<_>>()
                             .join(",");
-                        vector.insert(row, value.as_str())
+                        vector.insert(row, value.as_str())?
                     }
-                    6 => vector.typed_slice::<u64>()[row] = session.driver_stints.len() as u64,
-                    7 => vector.typed_slice::<u64>()[row] = session.laps.len() as u64,
+                    6 => vector.typed_slice::<u64>()?[row] = session.driver_stints.len() as u64,
+                    7 => vector.typed_slice::<u64>()?[row] = session.laps.len() as u64,
                     8 => match &session.fastest_lap {
-                        Some(lap) => vector.typed_slice::<i64>()[row] = lap.number,
-                        None => vector.set_null(row),
+                        Some(lap) => vector.typed_slice::<i64>()?[row] = lap.number,
+                        None => vector.set_null(row)?,
                     },
                     9 => match &session.fastest_lap {
-                        Some(lap) => vector.typed_slice::<u64>()[row] = lap.duration_ns,
-                        None => vector.set_null(row),
+                        Some(lap) => vector.typed_slice::<u64>()?[row] = lap.duration_ns,
+                        None => vector.set_null(row)?,
                     },
                     _ => unreachable!(),
                 }
             }
         }
-        output.set_len(n);
+        output.set_len(n)?;
         Ok(())
     }
 
@@ -1780,15 +1765,18 @@ struct WideInit {
     segments: Vec<WideSegment>,
     projected: Vec<u64>,
 }
-struct WideVTab;
+struct WideScan;
 
-impl VTab for WideVTab {
+impl TelemetryTable for WideScan {
     type BindData = WideBind;
     type InitData = WideInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        let config = unsafe { &*bind.get_extra_info::<ReaderConfig>() };
-        let pattern = bind.get_parameter(0).to_string();
+        let config = bind.reader_config()?;
+        let pattern = bind
+            .get_parameter(0)?
+            .get::<String>()?
+            .ok_or("path must not be NULL")?;
         let create_date_from = named_timestamp(bind, "create_date_from")?;
         let create_date_to = named_timestamp(bind, "create_date_to")?;
         if matches!((create_date_from, create_date_to), (Some(from), Some(to)) if to < from) {
@@ -1808,7 +1796,7 @@ impl VTab for WideVTab {
         let mut session_key = String::new();
         let mut session_base_ns = 0u64;
         if config.session {
-            let max_gap_seconds = named_i64(bind, "max_gap_seconds").unwrap_or(60);
+            let max_gap_seconds = named_i64(bind, "max_gap_seconds")?.unwrap_or(60);
             if !(0..=86_400).contains(&max_gap_seconds) {
                 return Err("max_gap_seconds must be between 0 and 86400".into());
             }
@@ -1834,35 +1822,35 @@ impl VTab for WideVTab {
                 .map(|index| metadata[*index].clone())
                 .collect();
         }
-        let rate = named_i64(bind, "rate").unwrap_or(100);
+        let rate = named_i64(bind, "rate")?.unwrap_or(100);
         if !(1..=5000).contains(&rate) {
             return Err("rate must be between 1 and 5000 Hz".into());
         }
-        let start_ns = named_i64(bind, "start_ns").unwrap_or(0).max(0) as u64;
-        let requested_end = named_i64(bind, "end_ns").unwrap_or(i64::MAX).max(0) as u64;
+        let start_ns = named_i64(bind, "start_ns")?.unwrap_or(0).max(0) as u64;
+        let requested_end = named_i64(bind, "end_ns")?.unwrap_or(i64::MAX).max(0) as u64;
         if requested_end < start_ns {
             return Err("end_ns must be greater than or equal to start_ns".into());
         }
-        let interpolation = named_string(bind, "interpolate")
+        let interpolation = named_string(bind, "interpolate")?
             .unwrap_or_else(|| "linear".into())
             .to_ascii_lowercase();
         if interpolation != "previous" && interpolation != "linear" {
             return Err("interpolate must be 'previous' or 'linear'".into());
         }
-        let filter = parse_channel_filter(named_string(bind, "channels").as_deref());
+        let filter = parse_channel_filter(named_string(bind, "channels")?.as_deref());
         // `filename` follows DuckDB's read_json/read_csv convention. Keep the
         // more explicit spelling as an alias for callers that use it already.
-        let include_filename = named_bool(bind, "filename").unwrap_or(false)
-            || named_bool(bind, "add_filename_as_column").unwrap_or(false);
-        let include_timestamps = named_bool(bind, "timestamps").unwrap_or(false);
+        let include_filename = named_bool(bind, "filename")?.unwrap_or(false)
+            || named_bool(bind, "add_filename_as_column")?.unwrap_or(false);
+        let include_timestamps = named_bool(bind, "timestamps")?.unwrap_or(false);
         // Unit aliases are strict DuckDB logical types, so opt in: they make
         // provenance available to telemetry_convert_column but intentionally
         // require an explicit ::DOUBLE before generic numeric functions.
-        let tag_units = named_bool(bind, "unit_tags").unwrap_or(false);
+        let tag_units = named_bool(bind, "unit_tags")?.unwrap_or(false);
         let include_create_date =
-            include_timestamps || named_bool(bind, "add_create_date_as_column").unwrap_or(false);
+            include_timestamps || named_bool(bind, "add_create_date_as_column")?.unwrap_or(false);
         let include_modified_at =
-            include_timestamps || named_bool(bind, "add_modified_at_as_column").unwrap_or(false);
+            include_timestamps || named_bool(bind, "add_modified_at_as_column")?.unwrap_or(false);
 
         let mut names = Vec::new();
         let mut keys = HashSet::new();
@@ -1925,19 +1913,19 @@ impl VTab for WideVTab {
                 ("driver_id", LogicalTypeId::Bigint),
                 ("lap_number", LogicalTypeId::Bigint),
             ] {
-                bind.add_result_column(name, ty(logical));
+                bind.add_result_column(name, ty(logical))?;
             }
         } else {
             if include_filename {
-                bind.add_result_column("filename", ty(LogicalTypeId::Varchar));
+                bind.add_result_column("filename", ty(LogicalTypeId::Varchar))?;
             }
             if include_create_date {
-                bind.add_result_column("create_date", ty(LogicalTypeId::Timestamp));
+                bind.add_result_column("create_date", ty(LogicalTypeId::Timestamp))?;
             }
             if include_modified_at {
-                bind.add_result_column("modified_at", ty(LogicalTypeId::Timestamp));
+                bind.add_result_column("modified_at", ty(LogicalTypeId::Timestamp))?;
             }
-            bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint));
+            bind.add_result_column("time_ns", ty(LogicalTypeId::Bigint))?;
         }
         // Wide telemetry columns remain physically DOUBLE, but known units are
         // carried as logical aliases. telemetry_convert_column() reads this
@@ -1960,7 +1948,7 @@ impl VTab for WideVTab {
                 // single tag. Leave it untagged so inference fails loudly.
                 ty(LogicalTypeId::Double)
             };
-            bind.add_result_column(channel_map.name_for(name), logical);
+            bind.add_result_column(channel_map.name_for(name), logical)?;
         }
 
         let source_channels = files
@@ -2030,7 +2018,7 @@ impl VTab for WideVTab {
             ranges.push((local_start, end, rows));
             total_rows = total_rows.saturating_add(rows);
         }
-        bind.set_cardinality(total_rows, true);
+        bind.set_cardinality(total_rows, true)?;
         Ok(WideBind {
             files,
             names,
@@ -2052,7 +2040,7 @@ impl VTab for WideVTab {
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
-        let bind = unsafe { &*init.get_bind_data::<WideBind>() };
+        let bind = init.get_bind_data::<WideBind>();
         let mut segments = Vec::new();
         for (file, &(_, _, rows)) in bind.ranges.iter().enumerate() {
             let mut row = 0;
@@ -2088,7 +2076,7 @@ impl VTab for WideVTab {
         let state = func.get_init_data();
         let segment_idx = state.next.fetch_add(1, Ordering::Relaxed);
         let Some(segment) = state.segments.get(segment_idx) else {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         };
         let bind = func.get_bind_data();
@@ -2107,49 +2095,49 @@ impl VTab for WideVTab {
                 };
                 match original {
                     0 => {
-                        let vector = output.flat_vector(out_col);
+                        let mut vector = output.flat_vector(out_col)?;
                         for row in 0..n {
-                            vector.insert(row, bind.session_key.as_str());
+                            vector.insert(row, bind.session_key.as_str())?;
                         }
                     }
                     1 => {
                         let offset = bind.session_offsets_ns[segment.file];
-                        let mut vector = output.flat_vector(out_col);
-                        let dst = &mut vector.typed_slice::<i64>()[..n];
+                        let mut vector = output.flat_vector(out_col)?;
+                        let dst = &mut vector.typed_slice::<i64>()?[..n];
                         for (row, value) in dst.iter_mut().enumerate() {
                             *value = i64::try_from(i128::from(file_time_ns(row)) + offset)
                                 .unwrap_or(i64::MAX);
                         }
                     }
                     2 => {
-                        let mut vector = output.flat_vector(out_col);
-                        let dst = &mut vector.typed_slice::<i64>()[..n];
+                        let mut vector = output.flat_vector(out_col)?;
+                        let dst = &mut vector.typed_slice::<i64>()?[..n];
                         for (row, value) in dst.iter_mut().enumerate() {
                             *value = file_time_ns(row) as i64;
                         }
                     }
                     3 => {
-                        let vector = output.flat_vector(out_col);
+                        let mut vector = output.flat_vector(out_col)?;
                         for row in 0..n {
-                            vector.insert(row, file.path());
+                            vector.insert(row, file.path())?;
                         }
                     }
                     4..=6 => {
-                        let mut vector = output.flat_vector(out_col);
+                        let mut vector = output.flat_vector(out_col)?;
                         for row in 0..n {
                             let reference = file.video_reference_at(file_time_ns(row));
                             match original {
                                 4 => match reference.file_index {
-                                    Some(value) => vector.typed_slice::<u32>()[row] = value,
-                                    None => vector.set_null(row),
+                                    Some(value) => vector.typed_slice::<u32>()?[row] = value,
+                                    None => vector.set_null(row)?,
                                 },
                                 5 => match reference.frame_index {
-                                    Some(value) => vector.typed_slice::<u64>()[row] = value,
-                                    None => vector.set_null(row),
+                                    Some(value) => vector.typed_slice::<u64>()?[row] = value,
+                                    None => vector.set_null(row)?,
                                 },
                                 6 => match reference.sync_time {
-                                    Some(value) => vector.typed_slice::<f64>()[row] = value,
-                                    None => vector.set_null(row),
+                                    Some(value) => vector.typed_slice::<f64>()?[row] = value,
+                                    None => vector.set_null(row)?,
                                 },
                                 _ => unreachable!(),
                             }
@@ -2161,16 +2149,16 @@ impl VTab for WideVTab {
                         } else {
                             bind.lap_channels[segment.file]
                         };
-                        let mut vector = output.flat_vector(out_col);
+                        let mut vector = output.flat_vector(out_col)?;
                         for row in 0..n {
                             match channel_index
                                 .and_then(|index| file.sample_at(index, file_time_ns(row), false))
                                 .filter(|value| value.is_finite())
                             {
                                 Some(value) => {
-                                    vector.typed_slice::<i64>()[row] = value.round() as i64
+                                    vector.typed_slice::<i64>()?[row] = value.round() as i64
                                 }
-                                None => vector.set_null(row),
+                                None => vector.set_null(row)?,
                             }
                         }
                     }
@@ -2178,24 +2166,24 @@ impl VTab for WideVTab {
                         && (col - SESSION_FIXED_COLUMNS) < bind.names.len() as u64 =>
                     {
                         let wide_idx = (col - SESSION_FIXED_COLUMNS) as usize;
-                        let mut vector = output.flat_vector(out_col);
+                        let mut vector = output.flat_vector(out_col)?;
                         if let Some(channel_idx) = bind.source_channels[segment.file][wide_idx] {
                             let conversion = bind.conversions.get(wide_idx).copied().flatten();
                             for row in 0..n {
                                 if let Some(value) =
                                     file.sample_at(channel_idx, file_time_ns(row), bind.linear)
                                 {
-                                    vector.typed_slice::<f64>()[row] = match conversion {
+                                    vector.typed_slice::<f64>()?[row] = match conversion {
                                         Some((scale, offset)) => value * scale + offset,
                                         None => value,
                                     };
                                 } else {
-                                    vector.set_null(row);
+                                    vector.set_null(row)?;
                                 }
                             }
                         } else {
                             for row in 0..n {
-                                vector.set_null(row);
+                                vector.set_null(row)?;
                             }
                         }
                     }
@@ -2209,22 +2197,22 @@ impl VTab for WideVTab {
             let channel_offset = time_column + 1;
             match original {
                 0 if bind.include_filename => {
-                    let vector = output.flat_vector(out_col);
+                    let mut vector = output.flat_vector(out_col)?;
                     for row in 0..n {
-                        vector.insert(row, file.path());
+                        vector.insert(row, file.path())?;
                     }
                 }
                 col if bind.include_create_date && col == create_date_column => {
-                    output.flat_vector(out_col).typed_slice::<i64>()[..n]
+                    output.flat_vector(out_col)?.typed_slice::<i64>()?[..n]
                         .fill(file.create_date_micros);
                 }
                 col if bind.include_modified_at && col == modified_at_column => {
-                    output.flat_vector(out_col).typed_slice::<i64>()[..n]
+                    output.flat_vector(out_col)?.typed_slice::<i64>()?[..n]
                         .fill(file.modified_at_micros);
                 }
                 col if col == time_column => {
-                    let mut vector = output.flat_vector(out_col);
-                    let dst = &mut vector.typed_slice::<i64>()[..n];
+                    let mut vector = output.flat_vector(out_col)?;
+                    let dst = &mut vector.typed_slice::<i64>()?[..n];
                     for (row, value) in dst.iter_mut().enumerate() {
                         let source_row = segment.row_start + row as u64;
                         *value = (start_ns as u128
@@ -2236,7 +2224,7 @@ impl VTab for WideVTab {
                     && (col - channel_offset) < bind.names.len() as u64 =>
                 {
                     let wide_idx = (col - channel_offset) as usize;
-                    let mut vector = output.flat_vector(out_col);
+                    let mut vector = output.flat_vector(out_col)?;
                     if let Some(channel_idx) = bind.source_channels[segment.file][wide_idx] {
                         // Only mapped channels are converted; everything else
                         // passes through exactly as decoded.
@@ -2247,24 +2235,26 @@ impl VTab for WideVTab {
                                 + source_row as u128 * 1_000_000_000u128 / bind.rate as u128)
                                 as u64;
                             if let Some(value) = file.sample_at(channel_idx, time_ns, bind.linear) {
-                                vector.typed_slice::<f64>()[row] = match conversion {
+                                vector.typed_slice::<f64>()?[row] = match conversion {
                                     Some((scale, offset)) => value * scale + offset,
                                     None => value,
                                 };
                             } else {
-                                vector.set_null(row);
+                                vector.set_null(row)?;
                             }
                         }
                     } else {
                         for row in 0..n {
-                            vector.set_null(row);
+                            vector.set_null(row)?;
                         }
                     }
                 }
-                _ => output.flat_vector(out_col).typed_slice::<i64>()[..n].fill(segment_idx as i64),
+                _ => {
+                    output.flat_vector(out_col)?.typed_slice::<i64>()?[..n].fill(segment_idx as i64)
+                }
             }
         }
-        output.set_len(n);
+        output.set_len(n)?;
         Ok(())
     }
 
@@ -2324,21 +2314,27 @@ struct CommentsInit {
     next: AtomicUsize,
 }
 
-struct CommentsVTab;
+struct CommentsScan;
 
-impl VTab for CommentsVTab {
+impl TelemetryTable for CommentsScan {
     type BindData = CommentsBind;
     type InitData = CommentsInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        let pattern = bind.get_parameter(0).to_string();
-        let table = bind.get_parameter(1).to_string();
+        let pattern = bind
+            .get_parameter(0)?
+            .get::<String>()?
+            .ok_or("path must not be NULL")?;
+        let table = bind
+            .get_parameter(1)?
+            .get::<String>()?
+            .ok_or("path must not be NULL")?;
         let files = open_paths(bind, &pattern, None, None, None)?;
         let map = named_channel_map(bind)?;
         // Scope the output to a channel subset, so the generated DDL matches a
         // table materialised with the same `channels` filter instead of naming
         // columns that table does not have.
-        let filter = parse_channel_filter(named_string(bind, "channels").as_deref());
+        let filter = parse_channel_filter(named_string(bind, "channels")?.as_deref());
 
         for (name, logical) in [
             ("column_name", LogicalTypeId::Varchar),
@@ -2353,7 +2349,7 @@ impl VTab for CommentsVTab {
             // map can be recovered from the file rather than written by hand.
             ("channel_map_rule", LogicalTypeId::Varchar),
         ] {
-            bind.add_result_column(name, ty(logical));
+            bind.add_result_column(name, ty(logical))?;
         }
 
         // Deduplicate by column name: the same channel can appear in several
@@ -2406,7 +2402,7 @@ impl VTab for CommentsVTab {
                 (column, unit, ddl, payload, rule)
             })
             .collect::<Vec<_>>();
-        bind.set_cardinality(statements.len() as u64, true);
+        bind.set_cardinality(statements.len() as u64, true)?;
         Ok(CommentsBind { statements })
     }
 
@@ -2424,20 +2420,20 @@ impl VTab for CommentsVTab {
         let state = func.get_init_data();
         let start = state.next.fetch_add(VECTOR_SIZE as usize, Ordering::SeqCst);
         if start >= bind.statements.len() {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         }
         let end = (start + VECTOR_SIZE as usize).min(bind.statements.len());
         for (row, (column, unit, ddl, payload, rule)) in
             bind.statements[start..end].iter().enumerate()
         {
-            output.flat_vector(0).insert(row, column.as_str());
-            output.flat_vector(1).insert(row, unit.as_str());
-            output.flat_vector(2).insert(row, ddl.as_str());
-            output.flat_vector(3).insert(row, payload.as_str());
-            output.flat_vector(4).insert(row, rule.as_str());
+            output.flat_vector(0)?.insert(row, column.as_str())?;
+            output.flat_vector(1)?.insert(row, unit.as_str())?;
+            output.flat_vector(2)?.insert(row, ddl.as_str())?;
+            output.flat_vector(3)?.insert(row, payload.as_str())?;
+            output.flat_vector(4)?.insert(row, rule.as_str())?;
         }
-        output.set_len(end - start);
+        output.set_len(end - start)?;
         Ok(())
     }
 
@@ -2674,18 +2670,24 @@ struct WriteInit {
     done: AtomicUsize,
 }
 
-struct WriteVTab;
+struct WriteScan;
 
-impl VTab for WriteVTab {
+impl TelemetryTable for WriteScan {
     type BindData = WriteBind;
     type InitData = WriteInit;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        let pattern = bind.get_parameter(0).to_string();
-        let output = bind.get_parameter(1).to_string();
+        let pattern = bind
+            .get_parameter(0)?
+            .get::<String>()?
+            .ok_or("path must not be NULL")?;
+        let output = bind
+            .get_parameter(1)?
+            .get::<String>()?
+            .ok_or("path must not be NULL")?;
 
         // Default to the output file's extension, then fall back to motec.
-        let requested = named_string(bind, "format").unwrap_or_else(|| {
+        let requested = named_string(bind, "format")?.unwrap_or_else(|| {
             match Path::new(&output)
                 .extension()
                 .and_then(|value| value.to_str())
@@ -2724,24 +2726,24 @@ impl VTab for WriteVTab {
             ("sidecar", LogicalTypeId::Varchar),
             ("sidecar_bytes", LogicalTypeId::UBigint),
         ] {
-            bind.add_result_column(name, ty(logical));
+            bind.add_result_column(name, ty(logical))?;
         }
-        bind.set_cardinality(1, true);
+        bind.set_cardinality(1, true)?;
         let channel_mapping = named_string_rows(bind, "channel_mapping", 3)?;
         let sum_channels = named_string_rows(bind, "sum_channels", 4)?;
-        let include_unmapped = named_bool(bind, "include_unmapped").unwrap_or(false);
+        let include_unmapped = named_bool(bind, "include_unmapped")?.unwrap_or(false);
         let exclude_channels = named_string_list(bind, "exclude_channels")?;
         let metadata = MotecMetadata {
-            driver: named_string(bind, "driver").unwrap_or_default(),
-            vehicle: named_string(bind, "vehicle").unwrap_or_default(),
-            vehicle_number: named_string(bind, "vehicle_number").unwrap_or_default(),
-            team: named_string(bind, "team").unwrap_or_default(),
-            venue: named_string(bind, "venue").unwrap_or_default(),
-            event: named_string(bind, "event").unwrap_or_default(),
-            session: named_string(bind, "session").unwrap_or_default(),
-            short_comment: named_string(bind, "comment").unwrap_or_default(),
-            date: named_string(bind, "date").unwrap_or_default(),
-            time: named_string(bind, "time").unwrap_or_default(),
+            driver: named_string(bind, "driver")?.unwrap_or_default(),
+            vehicle: named_string(bind, "vehicle")?.unwrap_or_default(),
+            vehicle_number: named_string(bind, "vehicle_number")?.unwrap_or_default(),
+            team: named_string(bind, "team")?.unwrap_or_default(),
+            venue: named_string(bind, "venue")?.unwrap_or_default(),
+            event: named_string(bind, "event")?.unwrap_or_default(),
+            session: named_string(bind, "session")?.unwrap_or_default(),
+            short_comment: named_string(bind, "comment")?.unwrap_or_default(),
+            date: named_string(bind, "date")?.unwrap_or_default(),
+            time: named_string(bind, "time")?.unwrap_or_default(),
             ..Default::default()
         };
         Ok(WriteBind {
@@ -2768,7 +2770,7 @@ impl VTab for WriteVTab {
         let state = func.get_init_data();
         // Writing has a side effect, so run it exactly once.
         if state.done.fetch_add(1, Ordering::SeqCst) != 0 {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         }
         let bind = func.get_bind_data();
@@ -2799,17 +2801,17 @@ impl VTab for WriteVTab {
             .map(|channel| channel.sample_count)
             .sum::<u64>();
 
-        output.flat_vector(0).insert(0, input.path());
-        output.flat_vector(1).insert(0, bind.output.as_str());
-        output.flat_vector(2).insert(0, "motec");
-        output.flat_vector(3).typed_slice::<u64>()[0] = channels;
-        output.flat_vector(4).typed_slice::<u64>()[0] = samples;
-        output.flat_vector(5).typed_slice::<u64>()[0] = bytes.len() as u64;
+        output.flat_vector(0)?.insert(0, input.path())?;
+        output.flat_vector(1)?.insert(0, bind.output.as_str())?;
+        output.flat_vector(2)?.insert(0, "motec")?;
+        output.flat_vector(3)?.typed_slice::<u64>()?[0] = channels;
+        output.flat_vector(4)?.typed_slice::<u64>()?[0] = samples;
+        output.flat_vector(5)?.typed_slice::<u64>()?[0] = bytes.len() as u64;
         output
-            .flat_vector(6)
-            .insert(0, sidecar.to_string_lossy().as_ref());
-        output.flat_vector(7).typed_slice::<u64>()[0] = sidecar_bytes.len() as u64;
-        output.set_len(1);
+            .flat_vector(6)?
+            .insert(0, sidecar.to_string_lossy().as_ref())?;
+        output.flat_vector(7)?.typed_slice::<u64>()?[0] = sidecar_bytes.len() as u64;
+        output.set_len(1)?;
         Ok(())
     }
 
@@ -2843,77 +2845,39 @@ impl VTab for WriteVTab {
     }
 }
 
-#[cfg_attr(
-    not(target_os = "emscripten"),
-    duckdb_entrypoint_c_api(ext_name = "motorsport_telemetry", min_duckdb_version = "v1.2.0")
-)]
-#[cfg_attr(
-    target_os = "emscripten",
-    duckdb_entrypoint_c_api(ext_name = "motorsport_telemetry", min_duckdb_version = "v1.2.0")
-)]
-pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
-    con.register_table_function::<ChannelsVTab>("telemetry_metadata")?;
-    con.register_table_function::<SessionMetadataVTab>("telemetry_session_metadata")?;
-    con.register_table_function::<FileMetadataVTab>("telemetry_file_metadata")?;
-    con.register_table_function::<LapsVTab>("telemetry_laps")?;
+#[duckdb_entrypoint_c_api_v2(extension_name = "motorsport_telemetry", api_version = "v2.0.0")]
+pub fn extension_entrypoint(extension: &Extension) -> Result<(), Box<dyn Error>> {
+    table::register::<ChannelsScan>(extension, "telemetry_metadata", None)?;
+    table::register::<SessionMetadataScan>(extension, "telemetry_session_metadata", None)?;
+    table::register::<FileMetadataScan>(extension, "telemetry_file_metadata", None)?;
+    table::register::<LapsScan>(extension, "telemetry_laps", None)?;
     #[cfg(not(target_os = "emscripten"))]
-    con.register_table_function::<NormalizedVTab>("read_telemetry_normalized")?;
-    con.register_table_function::<SamplesVTab>("telemetry_samples")?;
-    con.register_table_function_with_extra_info::<WideVTab, _>(
-        "read_telemetry",
-        &ReaderConfig {
-            format: None,
-            session: false,
-        },
-    )?;
-    con.register_table_function_with_extra_info::<WideVTab, _>(
-        "read_telemetry_session",
-        &ReaderConfig {
-            format: None,
-            session: true,
-        },
-    )?;
-    con.register_table_function_with_extra_info::<WideVTab, _>(
-        "read_aim",
-        &ReaderConfig {
-            format: Some("aimd"),
-            session: false,
-        },
-    )?;
-    con.register_table_function_with_extra_info::<WideVTab, _>(
-        "read_aimd",
-        &ReaderConfig {
-            format: Some("aimd"),
-            session: false,
-        },
-    )?;
-    con.register_table_function_with_extra_info::<WideVTab, _>(
-        "read_cosworth",
-        &ReaderConfig {
-            format: Some("pds"),
-            session: false,
-        },
-    )?;
-    con.register_table_function_with_extra_info::<WideVTab, _>(
-        "read_motec",
-        &ReaderConfig {
-            format: Some("motec"),
-            session: false,
-        },
-    )?;
-    con.register_table_function_with_extra_info::<WideVTab, _>(
-        "read_vbo",
-        &ReaderConfig {
-            format: Some("vbo"),
-            session: false,
-        },
-    )?;
-    con.register_table_function::<WriteVTab>("write_telemetry")?;
-    con.register_table_function::<CommentsVTab>("telemetry_column_comments")?;
-    con.register_table_function::<unit_sql::UnitsVTab>("telemetry_units")?;
-    con.register_scalar_function::<unit_sql::ConvertScalar>("telemetry_convert")?;
-    con.register_scalar_function::<unit_sql::ConvertColumnScalar>("telemetry_convert_column")?;
-    con.register_scalar_function::<unit_sql::CanConvertScalar>("telemetry_can_convert")?;
+    table::register::<NormalizedScan>(extension, "read_telemetry_normalized", None)?;
+    table::register::<SamplesScan>(extension, "telemetry_samples", None)?;
+    for (name, format, session) in [
+        ("read_telemetry", None, false),
+        ("read_telemetry_session", None, true),
+        ("read_cosworth", Some("pds"), false),
+        ("read_motec", Some("motec"), false),
+        ("read_vbo", Some("vbo"), false),
+    ] {
+        table::register::<WideScan>(extension, name, Some(ReaderConfig { format, session }))?;
+    }
+    #[cfg(not(target_os = "emscripten"))]
+    for name in ["read_aim", "read_aimd"] {
+        table::register::<WideScan>(
+            extension,
+            name,
+            Some(ReaderConfig {
+                format: Some("aimd"),
+                session: false,
+            }),
+        )?;
+    }
+    table::register::<WriteScan>(extension, "write_telemetry", None)?;
+    table::register::<CommentsScan>(extension, "telemetry_column_comments", None)?;
+    table::register::<unit_sql::UnitsScan>(extension, "telemetry_units", None)?;
+    unit_sql::register(extension)?;
     Ok(())
 }
 

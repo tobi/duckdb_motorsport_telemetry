@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synchronize generated package metadata from VERSION."""
+"""Synchronize native package metadata from VERSION. Browser v1 is frozen."""
 from __future__ import annotations
 
 import argparse
@@ -36,9 +36,6 @@ def expected_files(extension_version: str, cargo_version: str) -> dict[Path, str
     paths = [
         ROOT / "Cargo.toml",
         ROOT / "Cargo.lock",
-        ROOT / "wasm-extension" / "Cargo.toml",
-        ROOT / "wasm-extension" / "Cargo.lock",
-        ROOT / "web" / "package.json",
         ROOT / "community-extension" / "description.yml",
     ]
     files = {path: path.read_text(encoding="utf-8") for path in paths}
@@ -46,9 +43,9 @@ def expected_files(extension_version: str, cargo_version: str) -> dict[Path, str
     files[ROOT / "Cargo.toml"] = re.sub(
         r'(?m)^(version = ")[^"]+("$)', rf"\g<1>{cargo_version}\g<2>", files[ROOT / "Cargo.toml"], count=1
     )
-    for path in (ROOT / "Cargo.lock", ROOT / "wasm-extension" / "Cargo.lock"):
+    for path in (ROOT / "Cargo.lock",):
         content = files[path]
-        for package in WORKSPACE_PACKAGES | {"duckdb-motorsport-telemetry-wasm"}:
+        for package in WORKSPACE_PACKAGES:
             content = re.sub(
                 rf'(\[\[package\]\]\nname = "{re.escape(package)}"\nversion = ")[^"]+("$)',
                 rf"\g<1>{cargo_version}\g<2>",
@@ -58,12 +55,6 @@ def expected_files(extension_version: str, cargo_version: str) -> dict[Path, str
             )
         files[path] = content
 
-    files[ROOT / "wasm-extension" / "Cargo.toml"] = re.sub(
-        r'(?m)^(version = ")[^"]+("$)', rf"\g<1>{cargo_version}\g<2>", files[ROOT / "wasm-extension" / "Cargo.toml"], count=1
-    )
-    files[ROOT / "web" / "package.json"] = re.sub(
-        r'("version": ")[^"]+(",$)', rf"\g<1>{cargo_version}\g<2>", files[ROOT / "web" / "package.json"], count=1, flags=re.MULTILINE
-    )
     files[ROOT / "community-extension" / "description.yml"] = re.sub(
         r'(?m)^(  version: ).*$', rf"\g<1>{cargo_version}", files[ROOT / "community-extension" / "description.yml"], count=1
     )

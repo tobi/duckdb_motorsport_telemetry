@@ -56,7 +56,7 @@ app.innerHTML = `
   <main>
     <section class="install-banner" aria-label="DuckDB installation">
       <div class="install-intro"><span>INSTALL / DUCKDB 1.4.3</span><strong>Use the extension in your own SQL</strong><small>Start DuckDB with <code>duckdb -unsigned</code>, then run:</small></div>
-      <code class="install-command">INSTALL httpfs; LOAD httpfs;<br>INSTALL motorsport_telemetry FROM 'https://pages.tobi.lutke.com/duckdb_motorsport_telemetry';<br>LOAD motorsport_telemetry;</code>
+      <code class="install-command">-- Native DuckDB 2.0.0, after community publication<br>INSTALL AND LOAD motorsport_telemetry FROM community;</code>
       <button id="copyInstall" type="button">COPY SQL</button>
     </section>
     <section class="hero" id="dropZone">
@@ -826,7 +826,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-example]').forEach((button) 
   button.addEventListener('click', () => loadExample(Number(button.dataset.example), button));
 });
 $('#copyInstall').addEventListener('click', async () => {
-  const sql = `INSTALL httpfs;\nLOAD httpfs;\nINSTALL motorsport_telemetry FROM 'https://pages.tobi.lutke.com/duckdb_motorsport_telemetry';\nLOAD motorsport_telemetry;`;
+  const sql = `-- Native DuckDB 2.0.0, after community publication\nINSTALL AND LOAD motorsport_telemetry FROM community;`;
   await navigator.clipboard.writeText(sql);
   toast('Installation SQL copied');
 });

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${OUT:-"$ROOT/build/wasm"}
-VERSION=${EXTENSION_VERSION:-$(tr -d '\r\n' < "$ROOT/VERSION")}
+VERSION=v1.3.5 # Frozen API-v1 browser adapter, independently of native VERSION.
 TARGET=wasm32-unknown-emscripten
 ARCHIVE="$ROOT/wasm-extension/target/$TARGET/release/examples/libmotorsport_telemetry.a"
 RAW="$OUT/motorsport_telemetry.raw.wasm"
@@ -28,6 +28,7 @@ for platform in wasm_eh wasm_mvp; do
     --output "$OUT/$platform/motorsport_telemetry.duckdb_extension.wasm" \
     --platform "$platform" \
     --api-version v1.2.0 \
+    --abi-type C_STRUCT \
     --extension-version "$VERSION"
 done
 

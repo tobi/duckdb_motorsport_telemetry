@@ -9,36 +9,45 @@
 //!   by the wide telemetry readers and refuses ordinary scalar expressions.
 //! - `telemetry_can_convert(from, to)` — a boolean probe for the same.
 
-use duckdb::core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId};
-use duckdb::ffi::duckdb_string_t;
-use duckdb::types::DuckString;
-use duckdb::vscalar::{ScalarFunctionSignature, VScalar};
-use duckdb::vtab::arrow::WritableVector;
-use duckdb::vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab};
+use super::table::{
+    BindInfo, ChunkWriter as DataChunkHandle, InitInfo, SqlType as LogicalTypeHandle,
+    SqlType as LogicalTypeId, TableFunctionInfo, TelemetryTable,
+};
+use super::{ty, VECTOR_SIZE};
+use duckdb_neo::{
+    connection::Context,
+    data_chunk::VectorCollection,
+    extension::Extension,
+    logical_type::LogicalType,
+    scalar::{ScalarCallbacks, ScalarFunctionBuilder},
+    signature::{FunctionDocumentationBuilder, FunctionParameter, SignatureBuilder},
+    types::Any,
+    vector::{Unknown, Vector},
+    DuckDBType,
+};
 use motorsport_telemetry_core::units::{self, Dimension, UNITS};
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-use super::{ty, FlatVectorExt, VECTOR_SIZE};
-use duckdb::core::Inserter;
 
 const UNIT_ALIAS_PREFIX: &str = "telemetry_unit:";
 
 /// A DOUBLE carrying a canonical telemetry unit as its DuckDB logical alias.
 /// The physical representation stays numeric, so ordinary SQL remains fast.
 pub fn tagged_double(unit: &str) -> LogicalTypeHandle {
-    let mut logical = ty(LogicalTypeId::Double);
-    if let Some(canonical) = units::normalize(unit) {
-        logical.set_alias(&format!("{UNIT_ALIAS_PREFIX}{canonical}"));
+    let logical = ty(LogicalTypeId::Double);
+    match units::normalize(unit) {
+        Some(canonical) => {
+            LogicalTypeHandle::Alias(Box::new(logical), format!("{UNIT_ALIAS_PREFIX}{canonical}"))
+        }
+        None => logical,
     }
-    logical
 }
 
-fn tagged_unit(logical: &LogicalTypeHandle) -> Option<String> {
-    logical
-        .get_alias()?
+fn tagged_unit(logical: &LogicalType) -> duckdb_neo::Result<Option<String>> {
+    Ok(logical
+        .name()?
         .strip_prefix(UNIT_ALIAS_PREFIX)
-        .map(str::to_owned)
+        .map(str::to_owned))
 }
 
 // ── telemetry_units(): the registry as a table ──────────────────────
@@ -62,9 +71,9 @@ pub struct UnitsInit {
     next: AtomicUsize,
 }
 
-pub struct UnitsVTab;
+pub struct UnitsScan;
 
-impl VTab for UnitsVTab {
+impl TelemetryTable for UnitsScan {
     type BindData = UnitsBind;
     type InitData = UnitsInit;
 
@@ -79,7 +88,7 @@ impl VTab for UnitsVTab {
             ("to_base_offset", LogicalTypeId::Double),
             ("is_convertible", LogicalTypeId::Boolean),
         ] {
-            bind.add_result_column(name, ty(logical));
+            bind.add_result_column(name, ty(logical))?;
         }
 
         let mut rows = Vec::new();
@@ -103,7 +112,7 @@ impl VTab for UnitsVTab {
                 });
             }
         }
-        bind.set_cardinality(rows.len() as u64, true);
+        bind.set_cardinality(rows.len() as u64, true)?;
         Ok(UnitsBind { rows })
     }
 
@@ -121,23 +130,23 @@ impl VTab for UnitsVTab {
         let state = func.get_init_data();
         let start = state.next.fetch_add(VECTOR_SIZE as usize, Ordering::SeqCst);
         if start >= bind.rows.len() {
-            output.set_len(0);
+            output.set_len(0)?;
             return Ok(());
         }
         let end = (start + VECTOR_SIZE as usize).min(bind.rows.len());
         for (row, entry) in bind.rows[start..end].iter().enumerate() {
-            output.flat_vector(0).insert(row, entry.spelling);
-            output.flat_vector(1).insert(row, entry.canonical);
-            output.flat_vector(2).typed_slice::<bool>()[row] = entry.is_canonical;
-            output.flat_vector(3).insert(row, entry.dimension.name());
+            output.flat_vector(0)?.insert(row, entry.spelling)?;
+            output.flat_vector(1)?.insert(row, entry.canonical)?;
+            output.flat_vector(2)?.typed_slice::<bool>()?[row] = entry.is_canonical;
+            output.flat_vector(3)?.insert(row, entry.dimension.name())?;
             output
-                .flat_vector(4)
-                .insert(row, entry.dimension.base_unit());
-            output.flat_vector(5).typed_slice::<f64>()[row] = entry.factor;
-            output.flat_vector(6).typed_slice::<f64>()[row] = entry.offset;
-            output.flat_vector(7).typed_slice::<bool>()[row] = entry.dimension.is_convertible();
+                .flat_vector(4)?
+                .insert(row, entry.dimension.base_unit())?;
+            output.flat_vector(5)?.typed_slice::<f64>()?[row] = entry.factor;
+            output.flat_vector(6)?.typed_slice::<f64>()?[row] = entry.offset;
+            output.flat_vector(7)?.typed_slice::<bool>()?[row] = entry.dimension.is_convertible();
         }
-        output.set_len(end - start);
+        output.set_len(end - start)?;
         Ok(())
     }
 
@@ -146,131 +155,143 @@ impl VTab for UnitsVTab {
     }
 }
 
-// ── telemetry_convert(value, from, to) ──────────────────────────────
-
-/// Dimension-checked unit conversion.
-///
-/// Errors rather than returning a plausible-looking wrong number: converting
-/// m/s to bar, or a gear position to a percentage, is a bug in the query and
-/// should surface as one.
+// Scalar execution uses typed v2 views, which account for constant/dictionary
+// selection and SQL NULLs. No scalar assumes a flat physical input buffer.
 pub struct ConvertScalar;
-
-impl VScalar for ConvertScalar {
-    type State = ();
-
-    fn invoke(
-        _state: &Self::State,
-        input: &mut DataChunkHandle,
-        output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn Error>> {
-        let rows = input.len();
-        let values = input.flat_vector(0);
-        let values = unsafe { values.as_slice_with_len::<f64>(rows) };
-        let from = input.flat_vector(1);
-        let from = unsafe { from.as_slice_with_len::<duckdb_string_t>(rows) };
-        let to = input.flat_vector(2);
-        let to = unsafe { to.as_slice_with_len::<duckdb_string_t>(rows) };
-
-        let mut result = output.flat_vector();
-        let out = unsafe { result.as_mut_slice_with_len::<f64>(rows) };
-        for row in 0..rows {
-            let from_unit = DuckString::new(&mut { from[row] }).as_str().to_string();
-            let to_unit = DuckString::new(&mut { to[row] }).as_str().to_string();
-            // Propagate the registry's error verbatim: a dimension mismatch is
-            // a query bug and must not be silently coerced into a number.
-            out[row] = units::convert(values[row], &from_unit, &to_unit)?;
-        }
-        Ok(())
-    }
-
-    fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![ScalarFunctionSignature::exact(
-            vec![
-                ty(LogicalTypeId::Double),
-                ty(LogicalTypeId::Varchar),
-                ty(LogicalTypeId::Varchar),
-            ],
-            ty(LogicalTypeId::Double),
-        )]
-    }
-}
-
-// ── telemetry_convert_column(tagged_column, to) ────────────────────
-
-/// Convert a unit-tagged wide-reader column without repeating its source unit.
-///
-/// Expressions and scalar literals deliberately fail because DuckDB strips the
-/// source column's logical alias once provenance is no longer unambiguous. Use
-/// the explicit three-argument `telemetry_convert` for those values.
 pub struct ConvertColumnScalar;
-
-impl VScalar for ConvertColumnScalar {
-    type State = ();
-
-    fn invoke(
-        _state: &Self::State,
-        input: &mut DataChunkHandle,
-        output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn Error>> {
-        let from_unit = tagged_unit(&input.flat_vector(0).logical_type()).ok_or(
-            "telemetry_convert_column requires a unit-tagged column from read_telemetry, \
-             read_cosworth, or read_motec; for a scalar or expression use \
-             telemetry_convert(value, from_unit, to_unit)",
-        )?;
-        let rows = input.len();
-        let values = input.flat_vector(0);
-        let values = unsafe { values.as_slice_with_len::<f64>(rows) };
-        let to = input.flat_vector(1);
-        let to = unsafe { to.as_slice_with_len::<duckdb_string_t>(rows) };
-
-        let mut result = output.flat_vector();
-        let out = unsafe { result.as_mut_slice_with_len::<f64>(rows) };
-        for row in 0..rows {
-            let to_unit = DuckString::new(&mut { to[row] }).as_str().to_string();
-            out[row] = units::convert(values[row], &from_unit, &to_unit)?;
-        }
-        Ok(())
-    }
-
-    fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![ScalarFunctionSignature::exact(
-            vec![ty(LogicalTypeId::Any), ty(LogicalTypeId::Varchar)],
-            ty(LogicalTypeId::Double),
-        )]
-    }
-}
-
-/// True when a conversion is possible, for filtering without raising.
 pub struct CanConvertScalar;
 
-impl VScalar for CanConvertScalar {
-    type State = ();
-
-    fn invoke(
-        _state: &Self::State,
-        input: &mut DataChunkHandle,
-        output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn Error>> {
-        let rows = input.len();
-        let from = input.flat_vector(0);
-        let from = unsafe { from.as_slice_with_len::<duckdb_string_t>(rows) };
-        let to = input.flat_vector(1);
-        let to = unsafe { to.as_slice_with_len::<duckdb_string_t>(rows) };
-
-        let mut result = output.flat_vector();
-        let out = unsafe { result.as_mut_slice_with_len::<bool>(rows) };
-        for row in 0..rows {
-            let from_unit = DuckString::new(&mut { from[row] }).as_str().to_string();
-            let to_unit = DuckString::new(&mut { to[row] }).as_str().to_string();
-            out[row] = units::can_convert(&from_unit, &to_unit);
+impl ScalarCallbacks for ConvertScalar {
+    type BindData = ();
+    type InitData = ();
+    fn exec(
+        &self,
+        _bind: Option<&()>,
+        _init: Option<&mut ()>,
+        _context: &Context,
+        input: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> duckdb_neo::Result<()> {
+        let values = input.get_vector_at::<f64>(0)?;
+        let from = input.get_vector_at::<String>(1)?;
+        let to = input.get_vector_at::<String>(2)?;
+        let mut output = output.cast::<f64>()?;
+        output.set_size(input.row_count()?)?;
+        for row in 0..input.row_count()? {
+            let result = match (values.get(row)?, from.get(row)?, to.get(row)?) {
+                (Some(value), Some(from), Some(to)) => Some(
+                    units::convert(*value, from, to)
+                        .map_err(|e| duckdb_neo::Error::invalid_input(e.to_string()))?,
+                ),
+                _ => None,
+            };
+            output.write(row, result)?;
         }
         Ok(())
     }
-
-    fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![ScalarFunctionSignature::exact(
-            vec![ty(LogicalTypeId::Varchar), ty(LogicalTypeId::Varchar)],
-            ty(LogicalTypeId::Boolean),
-        )]
+}
+impl ScalarCallbacks for ConvertColumnScalar {
+    type BindData = ();
+    type InitData = ();
+    fn exec(
+        &self,
+        _bind: Option<&()>,
+        _init: Option<&mut ()>,
+        _context: &Context,
+        input: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> duckdb_neo::Result<()> {
+        let values = input.get_vector_at::<f64>(0)?;
+        let from = tagged_unit(values.logical_type())?.ok_or_else(|| duckdb_neo::Error::invalid_input(
+            "telemetry_convert_column requires a unit-tagged column from read_telemetry, read_cosworth, or read_motec; for a scalar or expression use telemetry_convert(value, from_unit, to_unit)"))?;
+        let to = input.get_vector_at::<String>(1)?;
+        let mut output = output.cast::<f64>()?;
+        output.set_size(input.row_count()?)?;
+        for row in 0..input.row_count()? {
+            let result = match (values.get(row)?, to.get(row)?) {
+                (Some(value), Some(to)) => Some(
+                    units::convert(*value, &from, to)
+                        .map_err(|e| duckdb_neo::Error::invalid_input(e.to_string()))?,
+                ),
+                _ => None,
+            };
+            output.write(row, result)?;
+        }
+        Ok(())
     }
+}
+impl ScalarCallbacks for CanConvertScalar {
+    type BindData = ();
+    type InitData = ();
+    fn exec(
+        &self,
+        _bind: Option<&()>,
+        _init: Option<&mut ()>,
+        _context: &Context,
+        input: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> duckdb_neo::Result<()> {
+        let from = input.get_vector_at::<String>(0)?;
+        let to = input.get_vector_at::<String>(1)?;
+        let mut output = output.cast::<bool>()?;
+        output.set_size(input.row_count()?)?;
+        for row in 0..input.row_count()? {
+            let result = match (from.get(row)?, to.get(row)?) {
+                (Some(from), Some(to)) => Some(units::can_convert(from, to)),
+                _ => None,
+            };
+            output.write(row, result)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn register(extension: &Extension) -> duckdb_neo::Result<()> {
+    let docs = |description: &str, example: &str| {
+        FunctionDocumentationBuilder::new()
+            .description(description)
+            .add_category("telemetry")
+            .add_example("", example)
+    };
+    ScalarFunctionBuilder::new(
+        "telemetry_convert",
+        SignatureBuilder::new()
+            .param(FunctionParameter::new::<f64>("value"))
+            .param(FunctionParameter::new::<String>("from_unit"))
+            .param(FunctionParameter::new::<String>("to_unit"))
+            .return_type(f64::logical_type(extension)?)
+            .documentation(docs(
+                "Convert compatible telemetry units; incompatible dimensions raise an error.",
+                "telemetry_convert(10.0, 'm/s', 'km/h')",
+            )),
+        ConvertScalar,
+    )
+    .register(extension)?;
+    ScalarFunctionBuilder::new(
+        "telemetry_convert_column",
+        SignatureBuilder::new()
+            .param(FunctionParameter::new::<Any>("column"))
+            .param(FunctionParameter::new::<String>("to_unit"))
+            .return_type(f64::logical_type(extension)?)
+            .documentation(docs(
+                "Convert a numeric column carrying a telemetry unit alias.",
+                "telemetry_convert_column(speed, 'km/h')",
+            )),
+        ConvertColumnScalar,
+    )
+    .register(extension)?;
+    ScalarFunctionBuilder::new(
+        "telemetry_can_convert",
+        SignatureBuilder::new()
+            .param(FunctionParameter::new::<String>("from_unit"))
+            .param(FunctionParameter::new::<String>("to_unit"))
+            .return_type(bool::logical_type(extension)?)
+            .documentation(docs(
+                "Whether two telemetry units have compatible dimensions.",
+                "telemetry_can_convert('m/s', 'km/h')",
+            )),
+        CanConvertScalar,
+    )
+    .register(extension)?;
+    Ok(())
 }
